@@ -320,15 +320,15 @@ function testPolicyTiers() {
   assert.equal(applyPolicy('user', { ...base, img2img: { image: 'data:image/png;base64,abc' } }, pro).ok, true);
   assert.equal(applyPolicy('user', { ...base, width: 1024, height: 1536, steps: 40 }, pro).ok, true);
   assert.equal(applyPolicy('user', { ...base, width: 1536, height: 1536 }, pro).code, 'size');
-  // 没有 Anlas 日额度的等级不能发起计费请求
-  const noAnlas = { ...pro, anlas_per_day: 0 };
+  // 没有月度 Anlas 额度的等级不能发起计费请求
+  const noAnlas = { ...pro, anlas_per_month: 0 };
   assert.equal(applyPolicy('user', { ...base, nSamples: 2 }, noAnlas).code, 'anlas');
   // 未传等级时等同默认免费等级
   assert.equal(applyPolicy('user', { ...base, nSamples: 2 }).code, 'n_samples');
 
-  assert.equal(parseTierInput({ name: '', max_pixels: 1048576, max_steps: 28, max_samples: 1, anlas_per_day: 0 }).ok, false);
-  assert.equal(parseTierInput({ name: 'x', max_pixels: 1048576, max_steps: 99, max_samples: 1, anlas_per_day: 0 }).ok, false);
-  const parsed = parseTierInput({ name: ' VIP ', max_pixels: 2359296, max_steps: 50, max_samples: 8, anlas_per_day: 1000, limit_per_day: '' });
+  assert.equal(parseTierInput({ name: '', max_pixels: 1048576, max_steps: 28, max_samples: 1, anlas_per_month: 0 }).ok, false);
+  assert.equal(parseTierInput({ name: 'x', max_pixels: 1048576, max_steps: 99, max_samples: 1, anlas_per_month: 0 }).ok, false);
+  const parsed = parseTierInput({ name: ' VIP ', max_pixels: 2359296, max_steps: 50, max_samples: 8, anlas_per_month: 1000, limit_per_day: '' });
   assert.equal(parsed.ok, true);
   assert.equal(parsed.value.name, 'VIP');
   assert.equal(parsed.value.limit_per_day, null);
@@ -1048,36 +1048,40 @@ async function testTiers(adminHeaders, normalHeaders, normalUserId) {
   quota = await me();
   assert.equal(quota.tier.name, '高级用户');
   const dayBefore = quota.usage.day;
-  const anlasBefore = quota.usage.anlasDay;
+  const anlasBefore = quota.usage.anlasMonth;
   const two = await post('/api/generate', { ...genBody, nSamples: 2 }, normalHeaders);
   assert.equal(two.response.status, 200, JSON.stringify(two.body));
   assert.equal(two.body.images.length, 2);
   assert.ok(two.body.anlas > 0);
   quota = await me();
   assert.equal(quota.usage.day, dayBefore + 2);
-  assert.equal(quota.usage.anlasDay, anlasBefore + two.body.anlas);
+  assert.equal(quota.usage.anlasMonth, anlasBefore + two.body.anlas);
 
-  // 单人覆盖：Anlas 日额度不足时拒绝，清空覆盖后恢复跟随等级
-  assert.equal((await post(`/api/admin/users/${normalUserId}`, { anlasPerDayOverride: quota.usage.anlasDay + 1 })).response.status, 200);
+  // 单人覆盖：本月 Anlas 额度不足时拒绝，清空覆盖后恢复跟随等级
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { anlasPerMonthOverride: quota.usage.anlasMonth + 1 })).response.status, 200);
   const broke = await post('/api/generate', { ...genBody, nSamples: 2 }, normalHeaders);
   assert.equal(broke.response.status, 429);
-  assert.match(broke.body.error, /Anlas 额度不足/);
-  assert.equal((await post(`/api/admin/users/${normalUserId}`, { anlasPerDayOverride: '' })).response.status, 200);
-  assert.equal((await me()).tier.anlasPerDay, proTier.anlas_per_day);
+  assert.match(broke.body.error, /本月 Anlas 额度不足/);
+  // “重置计数”只清张数频控，不会把本月已用 Anlas 清零
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { resetQuota: true })).response.status, 200);
+  assert.equal((await me()).usage.anlasMonth, quota.usage.anlasMonth);
+  assert.equal((await post('/api/generate', { ...genBody, nSamples: 2 }, normalHeaders)).response.status, 429);
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { anlasPerMonthOverride: '' })).response.status, 200);
+  assert.equal((await me()).tier.anlasPerMonth, proTier.anlas_per_month);
 
-  // 单人覆盖：每日张数到顶即拒绝
-  assert.equal((await post(`/api/admin/users/${normalUserId}`, { limitPerDayOverride: quota.usage.day })).response.status, 200);
+  // 单人覆盖：每日张数到顶即拒绝（上面重置过计数，以当前用量为准）
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { limitPerDayOverride: (await me()).usage.day })).response.status, 200);
   const capped = await post('/api/generate', genBody, normalHeaders);
   assert.equal(capped.response.status, 429);
   assert.match(capped.body.error, /每天限/);
   assert.equal((await post(`/api/admin/users/${normalUserId}`, { limitPerDayOverride: -1 })).response.status, 400);
   assert.equal((await post(`/api/admin/users/${normalUserId}`, { limitPerDayOverride: null })).response.status, 200);
 
-  // 管理员列表带出等级与 24 小时 Anlas 用量
+  // 管理员列表带出等级与本月 Anlas 用量
   const users = await request('/api/admin/users', { headers: adminHeaders });
   const row = users.body.items.find(u => u.id === normalUserId);
   assert.equal(row.tier_name, '高级用户');
-  assert.ok(row.a1 >= two.body.anlas);
+  assert.ok(row.anlas_month >= two.body.anlas);
 
   // 删除等级：其下用户回到默认等级；默认等级不可删
   const temp = await post('/api/admin/tiers', { ...proTier, name: '临时等级' });

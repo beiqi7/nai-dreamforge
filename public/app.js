@@ -133,11 +133,11 @@ function updateUserBadge() {
 /* ─── 当前用户能力：管理员不限；普通用户取所在等级（/api/me 的 quota.tier） ─── */
 const FREE_CAPS = {
   name: '普通用户', maxPixels: 1048576, maxSteps: 28, maxSamples: 1,
-  allowImg2img: false, allowInpaint: false, perMinute: 6, perHour: 66, perDay: 240, anlasPerDay: 0,
+  allowImg2img: false, allowInpaint: false, perMinute: 6, perHour: 66, perDay: 240, anlasPerMonth: 0,
 };
 function caps() {
   if (ME?.role === 'admin') {
-    return { admin: true, name: '管理员', maxPixels: 1536 * 1536, maxSteps: 50, maxSamples: 8, allowImg2img: true, allowInpaint: true, anlasPerDay: Infinity };
+    return { admin: true, name: '管理员', maxPixels: 1536 * 1536, maxSteps: 50, maxSamples: 8, allowImg2img: true, allowInpaint: true, anlasPerMonth: Infinity };
   }
   return { admin: false, ...FREE_CAPS, ...(ME?.quota?.tier || {}) };
 }
@@ -166,7 +166,7 @@ function renderQuota() {
     return;
   }
   const c = caps();
-  const usage = ME.quota?.usage || { day: 0, anlasDay: 0 };
+  const usage = ME.quota?.usage || { day: 0, anlasMonth: 0 };
   panel.classList.remove('hidden');
   $('quotaTierName').textContent = c.name;
   const rate = [c.perMinute != null ? `${c.perMinute}/分` : null, c.perHour != null ? `${c.perHour}/时` : null].filter(Boolean);
@@ -181,9 +181,9 @@ function renderQuota() {
   };
   setBar('quotaDayBar', 'quotaDayTxt', usage.day, c.perDay);
   const anlasRow = $('quotaAnlasRow');
-  if (c.anlasPerDay > 0) {
+  if (c.anlasPerMonth > 0) {
     anlasRow.classList.remove('hidden');
-    setBar('quotaAnlasBar', 'quotaAnlasTxt', usage.anlasDay, c.anlasPerDay);
+    setBar('quotaAnlasBar', 'quotaAnlasTxt', usage.anlasMonth, c.anlasPerMonth);
   } else {
     anlasRow.classList.add('hidden');
   }
@@ -191,7 +191,7 @@ function renderQuota() {
     `≤${Number((c.maxPixels / 1048576).toFixed(2))}MP`,
     `≤${c.maxSteps} 步`,
     c.maxSamples > 1 ? `单次 ≤${c.maxSamples} 张` : '单张',
-    c.anlasPerDay > 0 ? `可用 Anlas` : '仅免费参数',
+    c.anlasPerMonth > 0 ? `每月 ${c.anlasPerMonth} Anlas` : '仅免费参数',
   ].join(' · ');
 }
 
@@ -614,12 +614,12 @@ function updateAnlasEstimate() {
     badge.textContent = free ? '免费 · 0 Anlas' : `计费 · 约 ${est} Anlas`;
     $('anlasHint').textContent = free ? '预计 0 Anlas（Opus 免费规格）' : `预计约 ${est} Anlas`;
     if (!c.admin && !free) {
-      const left = c.anlasPerDay - (ME?.quota?.usage?.anlasDay || 0);
-      if (c.anlasPerDay <= 0) {
+      const left = c.anlasPerMonth - (ME?.quota?.usage?.anlasMonth || 0);
+      if (c.anlasPerMonth <= 0) {
         badge.className = 'tier-tag over';
         badge.textContent = '当前等级仅支持免费参数';
       } else {
-        $('anlasHint').textContent = `预计约 ${est} Anlas · 24h 剩余 ${Math.max(0, left)}`;
+        $('anlasHint').textContent = `预计约 ${est} Anlas · 本月剩余 ${Math.max(0, left)}`;
         if (est > left) badge.className = 'tier-tag over';
       }
     }
@@ -3531,10 +3531,10 @@ async function loadUsers() {
     const tierOptions = (selected) => adminTiers.map((t) => `<option value="${t.id}"${t.id === selected ? ' selected' : ''}>${esc(t.name)}</option>`).join('');
     $('usersTbl').querySelector('tbody').innerHTML = j.items.map((u) => {
       const isAdm = u.role === 'admin';
-      const hasOverride = u.limit_per_day_override != null || u.anlas_per_day_override != null;
+      const hasOverride = u.limit_per_day_override != null || u.anlas_per_month_override != null;
       const overrideTxt = [
         u.limit_per_day_override != null ? `${u.limit_per_day_override} 张/天` : null,
-        u.anlas_per_day_override != null ? `${u.anlas_per_day_override} Anlas/天` : null,
+        u.anlas_per_month_override != null ? `${u.anlas_per_month_override} Anlas/月` : null,
       ].filter(Boolean).join(' · ');
       return `<tr data-id="${u.id}">
         <td><div class="user-cell"><span class="avatar-dot">${esc(Array.from(u.username)[0].toUpperCase())}</span><div><b>${esc(u.username)}</b><small>#${u.id} · ${esc(String(u.created_at).slice(0, 10))}</small></div></div></td>
@@ -3542,7 +3542,7 @@ async function loadUsers() {
         <td>${u.disabled ? '<span class="status-dot off">已封禁</span>' : '<span class="status-dot on">正常</span>'}</td>
         <td class="usage-cell">${isAdm
           ? `<span class="muted-note">不受额度限制 · 累计 ${u.total_ok || 0} 张</span>`
-          : usageBarHtml('24h 出图', u.d1 || 0, u.limit_per_day) + (u.anlas_per_day > 0 ? usageBarHtml('24h Anlas', u.a1 || 0, u.anlas_per_day) : '')
+          : usageBarHtml('24h 出图', u.d1 || 0, u.limit_per_day) + (u.anlas_per_month > 0 ? usageBarHtml('本月 Anlas', u.anlas_month || 0, u.anlas_per_month) : '')
             + `<div class="usage-sub">近 1 分钟 ${u.m1 || 0}${u.limit_per_minute != null ? '/' + u.limit_per_minute : ''} · 近 1 小时 ${u.h1 || 0}${u.limit_per_hour != null ? '/' + u.limit_per_hour : ''} · 累计 ${u.total_ok || 0}</div>`}</td>
         <td>${isAdm ? '<span class="muted-note">—</span>' : `<button class="btn tiny ghost-btn act-quota" title="单独设置该用户的每日额度">${hasOverride ? esc(overrideTxt) : '跟随等级'} ✎</button>`}</td>
         <td class="row-actions">
@@ -3550,7 +3550,7 @@ async function loadUsers() {
           <button class="btn tiny ghost-btn act-rw">${isAdm ? '降为用户' : '设为管理'}</button>
           <button class="btn tiny ghost-btn act-ds">${u.disabled ? '解禁' : '封禁'}</button>
           <button class="btn tiny ghost-btn act-pw">改密</button>
-          ${!isAdm ? '<button class="btn tiny ghost-btn act-reset-quota" title="清零当前频控与 24 小时用量，立即恢复出图">重置用量</button>' : ''}
+          ${!isAdm ? '<button class="btn tiny ghost-btn act-reset-quota" title="清零分钟/小时/每日出图计数（不影响本月 Anlas）">重置计数</button>' : ''}
         </td>
       </tr>`;
     }).join('');
@@ -3589,7 +3589,7 @@ function bindUsersTable() {
       const pw = prompt('新密码 (≥8 位)：');
       if (pw) updateUser(u.id, { password: pw }, '密码已重置');
     } else if (btn.classList.contains('act-reset-quota')) {
-      if (!confirm(`确定重置用户「${u.username}」的用量吗？\n此前的生成不再计入频控与 24 小时额度，用户可立即恢复出图。`)) return;
+      if (!confirm(`确定重置用户「${u.username}」的出图计数吗？\n此前的生成不再计入分钟/小时/每日张数限制，用户可立即恢复出图。\n本月 Anlas 用量不受影响；如需追加 Anlas，请调高该用户的月度额度。`)) return;
       updateUser(u.id, { resetQuota: true }, `已重置 ${u.username} 的用量`);
     } else if (btn.classList.contains('act-quota')) {
       openQuotaDialog(u);
@@ -3606,11 +3606,11 @@ function openQuotaDialog(u) {
   bg.innerHTML = `
     <form class="modal-window quota-dialog">
       <div class="modal-title-row"><h3>单独设置额度 · ${esc(u.username)}</h3></div>
-      <p class="dialog-hint">留空表示跟随所在等级「${esc(tier?.name || '')}」（每天 ${tier?.limit_per_day ?? '不限'} 张 · 每天 ${tier?.anlas_per_day ?? 0} Anlas）。</p>
+      <p class="dialog-hint">留空表示跟随所在等级「${esc(tier?.name || '')}」（每天 ${tier?.limit_per_day ?? '不限'} 张 · 每月 ${tier?.anlas_per_month ?? 0} Anlas）。</p>
       <label class="form-row"><span>每天最多出图（张）</span>
         <input class="styled-admin-input" name="day" type="number" min="0" placeholder="跟随等级" value="${u.limit_per_day_override ?? ''}"></label>
-      <label class="form-row"><span>每天最多消耗 Anlas</span>
-        <input class="styled-admin-input" name="anlas" type="number" min="0" placeholder="跟随等级" value="${u.anlas_per_day_override ?? ''}"></label>
+      <label class="form-row"><span>每月最多消耗 Anlas（每月 1 日重置）</span>
+        <input class="styled-admin-input" name="anlas" type="number" min="0" placeholder="跟随等级" value="${u.anlas_per_month_override ?? ''}"></label>
       <div class="modal-actions">
         <button type="button" class="btn ghost-btn" data-act="cancel">取消</button>
         <button type="submit" class="btn primary">保存</button>
@@ -3622,7 +3622,7 @@ function openQuotaDialog(u) {
   bg.addEventListener('click', (e) => { if (e.target === bg || e.target.dataset.act === 'cancel') close(); });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const body = { limitPerDayOverride: form.elements.day.value, anlasPerDayOverride: form.elements.anlas.value };
+    const body = { limitPerDayOverride: form.elements.day.value, anlasPerMonthOverride: form.elements.anlas.value };
     close();
     await updateUser(u.id, body, '额度已保存');
   });
@@ -3649,7 +3649,7 @@ function tierCardHtml(t, isNew = false) {
       <label><span>最大分辨率</span><select class="styled-admin-select" name="max_pixels">${pixelOptions.map(([v, l]) => `<option value="${v}"${v === t.max_pixels ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
       <label><span>最大步数</span>${num('max_steps', t.max_steps, 'min="1" max="50" required')}</label>
       <label><span>单次最多张数</span>${num('max_samples', t.max_samples, 'min="1" max="8" required')}</label>
-      <label><span>每日 Anlas 额度</span>${num('anlas_per_day', t.anlas_per_day, 'min="0" required')}<small>0 = 只能用免费参数</small></label>
+      <label><span>每月 Anlas 额度</span>${num('anlas_per_month', t.anlas_per_month, 'min="0" required')}<small>0 = 只能用免费参数 · 每月 1 日重置</small></label>
       <label><span>每分钟上限（张）</span>${num('limit_per_minute', t.limit_per_minute, 'min="0" placeholder="不限"')}</label>
       <label><span>每小时上限（张）</span>${num('limit_per_hour', t.limit_per_hour, 'min="0" placeholder="不限"')}</label>
       <label><span>每天上限（张）</span>${num('limit_per_day', t.limit_per_day, 'min="0" placeholder="不限"')}</label>
@@ -3676,7 +3676,7 @@ function readTierForm(form) {
     max_pixels: Number(v('max_pixels')),
     max_steps: Number(v('max_steps')),
     max_samples: Number(v('max_samples')),
-    anlas_per_day: Number(v('anlas_per_day') || 0),
+    anlas_per_month: Number(v('anlas_per_month') || 0),
     limit_per_minute: nullable('limit_per_minute'),
     limit_per_hour: nullable('limit_per_hour'),
     limit_per_day: nullable('limit_per_day'),

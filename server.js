@@ -419,9 +419,9 @@ function quotaSnapshot(user) {
       perMinute: limits.limit_per_minute,
       perHour: limits.limit_per_hour,
       perDay: limits.limit_per_day,
-      anlasPerDay: limits.anlas_per_day,
+      anlasPerMonth: limits.anlas_per_month,
     },
-    usage: { minute: usage.count_1m, hour: usage.count_1h, day: usage.count_1d, anlasDay: usage.anlas_1d },
+    usage: { minute: usage.count_1m, hour: usage.count_1h, day: usage.count_1d, anlasMonth: usage.anlas_month },
   };
 }
 
@@ -436,7 +436,7 @@ async function handleAdmittedGenerate(req, res, user, preBody) {
     if ((pol.v.img2img && !limits.allow_img2img) || (pol.v.inpaint && !limits.allow_inpaint)) {
       return fail(res, 403, `当前等级「${limits.name}」没有图生图 / 局部重绘权限`);
     }
-    if (pol.anlas > 0 && !(limits.anlas_per_day > 0)) {
+    if (pol.anlas > 0 && !(limits.anlas_per_month > 0)) {
       return fail(res, 400, `当前等级「${limits.name}」仅支持 0 Anlas 的免费参数，请降低参数或联系管理员升级`);
     }
 
@@ -453,9 +453,9 @@ async function handleAdmittedGenerate(req, res, user, preBody) {
         return fail(res, 429, `已达出图上限：「${limits.name}」${per}限 ${max} 张（${recent}已生成 ${used} 张），${hint}`);
       }
     }
-    if (pol.anlas > 0 && counts.anlas_1d + pol.anlas > limits.anlas_per_day) {
-      const left = Math.max(0, limits.anlas_per_day - counts.anlas_1d);
-      return fail(res, 429, `Anlas 额度不足：本次约需 ${pol.anlas}，24 小时内还剩 ${left} / ${limits.anlas_per_day}，请降低参数或联系管理员`);
+    if (pol.anlas > 0 && counts.anlas_month + pol.anlas > limits.anlas_per_month) {
+      const left = Math.max(0, limits.anlas_per_month - counts.anlas_month);
+      return fail(res, 429, `本月 Anlas 额度不足：本次约需 ${pol.anlas}，本月还剩 ${left} / ${limits.anlas_per_month}，请降低参数或联系管理员`);
     }
   }
 
@@ -1094,12 +1094,12 @@ const server = http.createServer(async (req, res) => {
           if (!qTiers.get(Number(b.tierId))) return fail(res, 400, '等级不存在');
           qUsers.setTier(id, Number(b.tierId));
         }
-        if (b.limitPerDayOverride !== undefined || b.anlasPerDayOverride !== undefined) {
+        if (b.limitPerDayOverride !== undefined || b.anlasPerMonthOverride !== undefined) {
           const cur = qUsers.overrides(id);
           const day = b.limitPerDayOverride !== undefined ? parseOverride(b.limitPerDayOverride, 1_000_000) : { ok: true, value: cur.limit_per_day_override };
-          const anlas = b.anlasPerDayOverride !== undefined ? parseOverride(b.anlasPerDayOverride, 1_000_000) : { ok: true, value: cur.anlas_per_day_override };
+          const anlas = b.anlasPerMonthOverride !== undefined ? parseOverride(b.anlasPerMonthOverride, 10_000_000) : { ok: true, value: cur.anlas_per_month_override };
           if (!day.ok) return fail(res, 400, `每日张数${day.error}`);
-          if (!anlas.ok) return fail(res, 400, `每日 Anlas ${anlas.error}`);
+          if (!anlas.ok) return fail(res, 400, `每月 Anlas ${anlas.error}`);
           qUsers.setOverrides(id, day.value, anlas.value);
         }
         if (b.resetQuota === true) {
