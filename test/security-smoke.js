@@ -2,15 +2,41 @@
 
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
+const http = require('node:http');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { applyPolicy } = require('../lib/policy');
 const { MODELS, extractZipEntries } = require('../lib/nai');
 const scheduler = require('../lib/scheduler');
-const { crc32, zipStore } = require('../lib/zip');
+const { crc32, crc32Table, zipStore, zipStoreChunks } = require('../lib/zip');
 const { officialToSiteRequest, fakeOpusSubscription } = require('../lib/nai-compat');
+const zlib = require('node:zlib');
+const { decodePng, downscale, encodePng, makeThumbnail } = require('../lib/png');
+const { encodeJpeg, AC_LUMA_VALS, AC_CHROMA_VALS, ZIGZAG } = require('../lib/jpeg');
 
 const ROOT = path.join(__dirname, '..');
 const PORT = 18761;
+const UPSTREAM_PORT = 18762;
+const TEST_IMG_DIR = path.join(os.tmpdir(), `nai-smoke-${process.pid}`);
+const TEST_THUMB_DIR = path.join(os.tmpdir(), `nai-smoke-thumbs-${process.pid}`);
+
+function gradientImage(width, height, channels) {
+  const data = new Uint8Array(width * height * channels);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * channels;
+      data[o] = (x * 255 / width) | 0;
+      data[o + 1] = (y * 255 / height) | 0;
+      data[o + 2] = ((x + y) * 7) & 0xff;
+      if (channels === 4) data[o + 3] = x < width / 2 ? 255 : 128;
+    }
+  }
+  return { width, height, channels, data };
+}
+// 假上游返回真实可解码的 PNG，缩略图链路才能端到端跑通
+const FAKE_PNG = encodePng(gradientImage(512, 768, 3));
 
 /* ─── 工具 ─────────────────────────────────────────────── */
 
@@ -75,6 +101,101 @@ function testZipAndCompat() {
   assert.equal(mapped.body.ucPreset, 'none');
   assert.equal(mapped.body.charPrompts[0].prompt, 'long hair');
   assert.equal(fakeOpusSubscription().tier, 3);
+}
+
+/** 手工构造 PNG（任意颜色类型、可选 PLTE/tRNS），滤波统一为 Sub 以覆盖反滤波路径 */
+function rawPng({ width, height, color, rows, plte, trns }) {
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length, 0);
+    head.write(type, 4, 'latin1');
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
+    return Buffer.concat([head, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = color;
+  const bpp = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[color];
+  const filtered = Buffer.concat(rows.map((row) => {
+    const out = Buffer.alloc(row.length + 1);
+    out[0] = 1;
+    for (let x = 0; x < row.length; x++) out[x + 1] = (row[x] - (x >= bpp ? row[x - bpp] : 0)) & 0xff;
+    return out;
+  }));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    ...(plte ? [chunk('PLTE', Buffer.from(plte))] : []),
+    ...(trns ? [chunk('tRNS', Buffer.from(trns))] : []),
+    chunk('IDAT', zlib.deflateSync(filtered)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function testImageCodecs() {
+  // PNG 编解码往返无损（含逐行自适应滤波）
+  for (const ch of [3, 4]) {
+    const img = gradientImage(37, 23, ch);
+    const back = decodePng(encodePng(img));
+    assert.equal(back.width, 37);
+    assert.equal(back.channels, ch);
+    assert.deepEqual(Buffer.from(back.data), Buffer.from(img.data));
+  }
+  // 调色板 + tRNS → RGBA
+  const pal = decodePng(rawPng({
+    width: 3, height: 1, color: 3, rows: [[0, 1, 2]],
+    plte: [255, 0, 0, 0, 255, 0, 0, 0, 255], trns: [0, 128],
+  }));
+  assert.deepEqual([...pal.data], [255, 0, 0, 0, 0, 255, 0, 128, 0, 0, 255, 255]);
+  // 灰度 → RGB
+  const gray = decodePng(rawPng({ width: 2, height: 2, color: 0, rows: [[10, 20], [30, 40]] }));
+  assert.equal(gray.channels, 3);
+  assert.deepEqual([...gray.data], [10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40]);
+  assert.equal(decodePng(Buffer.from('not a png')), null);
+
+  // 面积平均缩放：尺寸按比例，纯色保持纯色，α 预乘不让透明像素把颜色拉黑
+  const small = downscale(gradientImage(400, 600, 3), 100);
+  assert.equal(small.width, 100);
+  assert.equal(small.height, 150);
+  const half = { width: 2, height: 1, channels: 4, data: Uint8Array.from([200, 100, 50, 255, 0, 0, 0, 0]) };
+  assert.deepEqual([...downscale(half, 1).data], [200, 100, 50, 128]);
+
+  // JPEG：Huffman 表恰好覆盖 162 个符号，zigzag 为 0..63 的排列，输出结构与尺寸正确
+  const symbols = new Set([0x00, 0xf0]);
+  for (let r = 0; r < 16; r++) for (let sz = 1; sz <= 10; sz++) symbols.add((r << 4) | sz);
+  for (const vals of [AC_LUMA_VALS, AC_CHROMA_VALS]) {
+    assert.equal(vals.length, 162);
+    assert.deepEqual(new Set(vals), symbols);
+  }
+  assert.equal(new Set(ZIGZAG).size, 64);
+  const jpg = encodeJpeg(gradientImage(50, 30, 3), 80);
+  assert.deepEqual([...jpg.subarray(0, 2)], [0xff, 0xd8]);
+  assert.deepEqual([...jpg.subarray(-2)], [0xff, 0xd9]);
+  const sof = jpg.indexOf(Buffer.from([0xff, 0xc0]));
+  assert.equal(jpg.readUInt16BE(sof + 5), 30);
+  assert.equal(jpg.readUInt16BE(sof + 7), 50);
+
+  // 缩略图：不透明 → JPEG，含透明 → PNG
+  assert.equal(makeThumbnail(FAKE_PNG, 384).type, 'image/jpeg');
+  const alphaThumb = makeThumbnail(encodePng(gradientImage(800, 400, 4)), 384);
+  assert.equal(alphaThumb.type, 'image/png');
+  assert.equal(decodePng(alphaThumb.data).width, 384);
+}
+
+async function testZipStreaming() {
+  const blob = crypto.randomBytes(100003);
+  assert.equal(crc32Table(blob), crc32(blob));
+  const files = [
+    { name: 'a.png', data: FAKE_PNG },
+    { name: '中文.png', data: Buffer.concat([FAKE_PNG, Buffer.from('tail')]) },
+  ];
+  const chunks = [];
+  for await (const chunk of zipStoreChunks(files)) chunks.push(chunk);
+  assert.deepEqual(Buffer.concat(chunks), zipStore(files));
+  assert.equal(extractZipEntries(Buffer.concat(chunks)).length, 2);
 }
 /* ─── 策略层单元测试 ───────────────────────────────────── */
 
@@ -154,6 +275,10 @@ function testPolicyInputValidation() {
   // 非对象请求体
   const notObj = applyPolicy('user', 'string');
   assert.equal(notObj.ok, false);
+
+  // 未知采样器/噪声调度在策略层即 400，而不是租到 key 后才失败
+  assert.equal(applyPolicy('user', { ...base, sampler: 'ddim_v3' }).code, 'sampler');
+  assert.equal(applyPolicy('user', { ...base, noiseSchedule: 'bogus' }).code, 'noiseSchedule');
 }
 
 function testPolicyAdminCapabilities() {
@@ -287,6 +412,42 @@ async function testCooldownWakesQueue() {
 
 /* ─── HTTP 集成安全测试 ─────────────────────────────────── */
 
+/** 假 NovelAI 上游：订阅查询 + 生图（返回含 n_samples 张 PNG 的 ZIP），记录收到的 payload */
+function startFakeUpstream() {
+  const received = [];
+  const server = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/user/subscription') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        tier: 3, active: true, expiresAt: 0, perks: {},
+        trainingStepsLeft: { fixedTrainingStepsLeft: 1000, purchasedTrainingSteps: 0 },
+        usage: { percent: 80 },
+      }));
+    }
+    if (req.method === 'GET' && req.url === '/user/information') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ plainTextEmail: 'fake@example.com' }));
+    }
+    if (req.method === 'POST' && req.url === '/ai/generate-image') {
+      if (String(req.headers.authorization || '').includes('pst-bad')) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ message: 'Invalid token' }));
+      }
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      received.push(payload);
+      const n = payload.parameters?.n_samples || 1;
+      const zip = zipStore(Array.from({ length: n }, (_, i) => ({ name: `image_${i}.png`, data: FAKE_PNG })));
+      res.writeHead(200, { 'content-type': 'application/zip', 'content-length': zip.length });
+      return res.end(zip);
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  return new Promise(resolve => server.listen(UPSTREAM_PORT, '127.0.0.1', () => resolve({ server, received })));
+}
+
 async function startServer() {
   const child = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
@@ -298,6 +459,9 @@ async function startServer() {
       ADMIN_USER: 'auditadmin',
       ADMIN_PASS: 'AuditPassword123',
       COOKIE_SECURE: '0',
+      NAI_IMAGE_BASE: `http://127.0.0.1:${UPSTREAM_PORT}`,
+      NAI_IMG_DIR: TEST_IMG_DIR,
+      NAI_THUMB_DIR: TEST_THUMB_DIR,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -308,6 +472,7 @@ async function startServer() {
 }
 
 async function testHttpSecurity() {
+  const upstream = await startFakeUpstream();
   const { child, stderr } = await startServer();
   try {
     await waitForServer(child);
@@ -318,6 +483,26 @@ async function testHttpSecurity() {
     assert.match(models.response.headers.get('content-security-policy') || '', /default-src 'self'/);
     assert.equal(models.response.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(models.response.headers.get('x-frame-options'), 'DENY');
+
+    // 静态资源：预压缩 + 内容哈希 URL；带当前哈希时可永久缓存
+    const index = await fetch(`http://127.0.0.1:${PORT}/`, { headers: { 'accept-encoding': 'br' } });
+    assert.equal(index.headers.get('content-encoding'), 'br');
+    assert.equal(index.headers.get('cache-control'), 'no-cache');
+    const html = await index.text();
+    const jsVersion = html.match(/src="\/app\.js\?v=([a-f0-9]{12})"/)?.[1];
+    assert.ok(jsVersion, 'index.html should reference hashed app.js');
+    assert.match(html, /href="\/style\.css\?v=[a-f0-9]{12}"/);
+    const appJs = await fetch(`http://127.0.0.1:${PORT}/app.js?v=${jsVersion}`, { headers: { 'accept-encoding': 'gzip' } });
+    assert.equal(appJs.headers.get('content-encoding'), 'gzip');
+    assert.match(appJs.headers.get('cache-control'), /immutable/);
+    assert.equal(await appJs.text(), fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8'));
+    const staleJs = await fetch(`http://127.0.0.1:${PORT}/app.js?v=000000000000`);
+    assert.equal(staleJs.headers.get('cache-control'), 'no-cache');
+    const notModified = await fetch(`http://127.0.0.1:${PORT}/app.js`, { headers: { 'if-none-match': appJs.headers.get('etag') } });
+    assert.equal(notModified.status, 304);
+    const modelsGz = await fetch(`http://127.0.0.1:${PORT}/api/models`, { headers: { 'accept-encoding': 'gzip' } });
+    assert.equal(modelsGz.headers.get('content-encoding'), 'gzip');
+    assert.ok((await modelsGz.json()).models);
 
     const health = await request('/api/health');
     assert.equal(health.response.status, 200);
@@ -332,6 +517,22 @@ async function testHttpSecurity() {
       assert.equal(failed.response.status, 401);
     }
     assert.equal((await login('locked-account', 'wrong-password')).response.status, 429);
+
+    // 伪造 X-Forwarded-For 最左侧条目不能绕过按 IP 限速：只认代理追加的最右侧地址
+    for (let i = 0; i < 20; i++) {
+      const r = await request('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': `198.51.100.${i}, 10.9.9.9` },
+        body: JSON.stringify({ username: `nobody-${i}`, password: 'wrong-password' }),
+      });
+      assert.equal(r.response.status, 401);
+    }
+    const spoofed = await request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.7, 10.9.9.9' },
+      body: JSON.stringify({ username: 'nobody-x', password: 'wrong-password' }),
+    });
+    assert.equal(spoofed.response.status, 429);
 
     // 管理员登录
     const admin = await login('auditadmin', 'AuditPassword123');
@@ -426,6 +627,12 @@ async function testHttpSecurity() {
     const sub = await request('/ai/user/subscription', { headers: bearer });
     assert.equal(sub.response.status, 200);
     assert.equal(sub.body.tier, 3);
+    // 去掉 /ai 前缀的别名同样走插件鉴权
+    assert.equal((await request('/user/subscription')).response.status, 401);
+    const subAlias = await request('/user/subscription', { headers: bearer });
+    assert.equal(subAlias.response.status, 200);
+    assert.equal(subAlias.body.tier, 3);
+    assert.equal((await request('/aix', { headers: bearer })).response.status, 404);
     const aiOpt = await request('/ai/generate-image', { method: 'OPTIONS' });
     assert.equal(aiOpt.response.status, 204);
     const aiBad = await request('/ai/generate-image', {
@@ -466,21 +673,31 @@ async function testHttpSecurity() {
     });
     assert.equal(bigReq.response.status, 413);
 
+    // 畸形会话 Cookie 不应让登出 500
+    const badCookieLogout = await request('/api/auth/logout', { method: 'POST', headers: { cookie: 'nai_session=%E0%A4%A' } });
+    assert.equal(badCookieLogout.response.status, 200);
+
     console.log('  [http-security] 基础 HTTP 安全测试通过');
     await testAdminProtection(child, adminHeaders, admin.cookie, admin2Id);
     await testProfileUpdate(child, admin.cookie, normalHeaders, normal.cookie);
     await testPromptLibraryAuth(child, normalHeaders, adminHeaders, admin.cookie);
     await testImageAccessControl(child, normal.cookie, admin.cookie);
     await testGalleryBatchAuth(child, normalHeaders);
+    await testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUserId);
   } finally {
     child.kill('SIGTERM');
     await new Promise(resolve => {
       child.once('exit', resolve);
       setTimeout(resolve, 2000).unref();
     });
+    upstream.server.close();
+    fs.rmSync(TEST_IMG_DIR, { recursive: true, force: true });
+    fs.rmSync(TEST_THUMB_DIR, { recursive: true, force: true });
   }
-  const errText = stderr();
-  if (errText && !/ExperimentalWarning/.test(errText)) throw new Error(errText);
+  // 只允许 Node 实验特性提示与调度器的预期告警；其余 stderr 一律视为失败
+  const unexpected = stderr().split('\n')
+    .filter(line => line.trim() && !/ExperimentalWarning|--trace-warnings|^\[scheduler\]/.test(line));
+  if (unexpected.length) throw new Error(unexpected.join('\n'));
 }
 
 async function testAdminProtection(child, adminHeaders, adminCookie, admin2Id) {
@@ -550,6 +767,18 @@ async function testProfileUpdate(child, adminCookie, normalHeaders, normalCookie
   const relogin = await login('normaluser', 'NewNormalPass123');
   assert.equal(relogin.response.status, 200);
   const newHeaders = jsonHeaders(relogin.cookie);
+
+  // 非字符串字段应 400，而非类型错误导致 500
+  const numericPass = await request('/api/user/profile', {
+    method: 'POST', headers: newHeaders,
+    body: JSON.stringify({ newPassword: 123456789, oldPassword: 'NewNormalPass123' }),
+  });
+  assert.equal(numericPass.response.status, 400);
+  const numericName = await request('/api/user/profile', {
+    method: 'POST', headers: newHeaders,
+    body: JSON.stringify({ newUsername: 12345 }),
+  });
+  assert.equal(numericName.response.status, 400);
 
   // 修改用户名为已占用名
   const dupName = await request('/api/user/profile', {
@@ -639,7 +868,119 @@ async function testGalleryBatchAuth(child, normalHeaders) {
   });
   assert.equal(emptyDl.response.status, 400);
 
+  const tooMany = await request('/api/history/batch-download', {
+    method: 'POST', headers: normalHeaders, body: JSON.stringify({ ids: Array.from({ length: 501 }, (_, i) => i + 1) })
+  });
+  assert.equal(tooMany.response.status, 400);
+
   console.log('  [gallery-batch] 画廊批量操作鉴权测试通过');
+}
+
+async function testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUserId) {
+  const addKey = await request('/api/admin/keys', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ label: 'fake', token: `pst-${'a'.repeat(32)}` }),
+  });
+  assert.equal(addKey.response.status, 200);
+  assert.equal(addKey.body.verify.ok, true);
+
+  // 普通用户未指定种子：响应中的种子须与实际发给上游的一致，并被写进历史
+  const gen = await request('/api/generate', {
+    method: 'POST', headers: normalHeaders,
+    body: JSON.stringify({ prompt: '1girl, solo', model: T2I_MODEL, width: 832, height: 1216, steps: 28 }),
+  });
+  assert.equal(gen.response.status, 200, JSON.stringify(gen.body));
+  const sentSeed = upstream.received.at(-1).parameters.seed;
+  assert.ok(Number.isInteger(sentSeed));
+  assert.equal(gen.body.seed, sentSeed);
+
+  const hist = await request('/api/history?limit=10', { headers: normalHeaders });
+  assert.equal(hist.response.status, 200);
+  const rec = hist.body.items.find(it => it.id === gen.body.gen_id);
+  assert.ok(rec);
+  assert.equal(rec.seed, sentSeed);
+
+  const img = await fetch(`http://127.0.0.1:${PORT}${gen.body.image}`, { headers: normalHeaders });
+  assert.equal(img.status, 200);
+  assert.deepEqual(Buffer.from(await img.arrayBuffer()), FAKE_PNG);
+
+  // 缩略图：属主可取，JPEG、宽 384；其他人 404
+  const thumbUrl = gen.body.image.replace('/img/', '/thumb/');
+  const thumb = await fetch(`http://127.0.0.1:${PORT}${thumbUrl}`, { headers: normalHeaders });
+  assert.equal(thumb.status, 200);
+  assert.equal(thumb.headers.get('content-type'), 'image/jpeg');
+  const thumbBuf = Buffer.from(await thumb.arrayBuffer());
+  const sof = thumbBuf.indexOf(Buffer.from([0xff, 0xc0]));
+  assert.equal(thumbBuf.readUInt16BE(sof + 7), 384);
+  assert.equal((await fetch(`http://127.0.0.1:${PORT}${thumbUrl}`)).status, 404);
+  const thumbBase = path.basename(gen.body.image, '.png');
+  assert.ok(fs.existsSync(path.join(TEST_THUMB_DIR, `${thumbBase}.jpg`)));
+
+  // 流式批量下载：返回合法 ZIP，内容与原图一致，文件名带 id
+  const dl = await fetch(`http://127.0.0.1:${PORT}/api/history/batch-download`, {
+    method: 'POST', headers: normalHeaders, body: JSON.stringify({ ids: [rec.id, rec.id, 999999] }),
+  });
+  assert.equal(dl.status, 200);
+  assert.equal(dl.headers.get('content-type'), 'application/zip');
+  const zipBuf = Buffer.from(await dl.arrayBuffer());
+  const pngs = extractZipEntries(zipBuf);
+  assert.equal(pngs.length, 1);
+  assert.deepEqual(pngs[0], FAKE_PNG);
+  assert.ok(zipBuf.includes(Buffer.from(`nai-${sentSeed}-${rec.id}.png`)));
+
+  const del = await request('/api/history/batch-delete', {
+    method: 'POST', headers: normalHeaders, body: JSON.stringify({ ids: [rec.id] }),
+  });
+  assert.equal(del.response.status, 200);
+  assert.equal(del.body.deleted, 1);
+  assert.ok(!fs.existsSync(path.join(TEST_THUMB_DIR, `${thumbBase}.jpg`)), 'thumbnail should be removed with the image');
+
+  const genBody = JSON.stringify({ prompt: '1girl, solo', model: T2I_MODEL, width: 832, height: 1216, steps: 28 });
+  const generate = () => request('/api/generate', { method: 'POST', headers: normalHeaders, body: genBody });
+
+  // 失效 key（上游 401）：自动停用并切到下一个 key，用户请求照常成功
+  const badKey = await request('/api/admin/keys', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ label: 'bad', token: `pst-bad${'b'.repeat(32)}` }),
+  });
+  assert.equal(badKey.response.status, 200);
+  const failover = await generate();
+  assert.equal(failover.response.status, 200, JSON.stringify(failover.body));
+  const keys = await request('/api/admin/keys', { headers: adminHeaders });
+  const bad = keys.body.items.find(k => k.id === badKey.body.id);
+  assert.equal(bad.is_active, 0);
+  assert.equal(bad.verify_state, 'invalid:401');
+
+  // 频控：每分钟 6 张后 429；管理员重置后立即恢复，且历史记录的时间不被改写
+  const before = (await request('/api/history?limit=1', { headers: normalHeaders })).body.items[0];
+  let limited = null;
+  for (let i = 0; i < 8 && !limited; i++) {
+    const r = await generate();
+    if (r.response.status === 429) limited = r;
+    else assert.equal(r.response.status, 200, JSON.stringify(r.body));
+  }
+  assert.ok(limited, 'expected per-minute limit to trigger');
+  const reset = await request(`/api/admin/users/${normalUserId}`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ resetQuota: true }),
+  });
+  assert.equal(reset.response.status, 200);
+  assert.equal((await generate()).response.status, 200);
+  const after = (await request('/api/history?limit=60', { headers: normalHeaders })).body.items.find(it => it.id === before.id);
+  assert.equal(after.created_at, before.created_at);
+
+  // 画廊游标分页：首屏带计数，翻页不重不漏
+  const page1 = await request('/api/history?limit=3&ok=1', { headers: normalHeaders });
+  assert.equal(page1.body.items.length, 3);
+  assert.ok(page1.body.counts.total >= 6);
+  assert.equal(page1.body.nextBefore, page1.body.items[2].id);
+  const page2 = await request(`/api/history?limit=3&ok=1&before=${page1.body.nextBefore}`, { headers: normalHeaders });
+  assert.equal(page2.body.counts, undefined);
+  assert.ok(page2.body.items.every(it => it.id < page1.body.nextBefore && it.status === 'ok'));
+  const all = await request('/api/history?limit=500&ok=1', { headers: normalHeaders });
+  assert.equal(all.body.items.length, page1.body.counts.total);
+  assert.equal(all.body.nextBefore, null);
+
+  console.log('  [generate-flow] 生图/历史/批量下载/失效 key 切换/频控重置测试通过');
 }
 async function testImageAccessControl(child, normalCookie, adminCookie) {
   // 无会话访问图片 → 404
@@ -666,6 +1007,8 @@ async function testImageAccessControl(child, normalCookie, adminCookie) {
   testPolicyInputValidation();
   testPolicyAdminCapabilities();
   testZipAndCompat();
+  testImageCodecs();
+  await testZipStreaming();
 
   console.log('Running scheduler tests...');
   await testLeaseRelease();

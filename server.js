@@ -38,20 +38,27 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 
 const { NaiClient, MODELS, SAMPLERS, NOISE_SCHEDULES, SIZE_PRESETS, UC_PRESETS, OPUS_FREE, calcAnlas, randomSeed } = require('./lib/nai');
 const { db, qUsers, qSessions, qKeys, qGens, qPrompts, qApiTokens, ensureAdmin, verifyPassword, verifyLoginPassword, isUniqueViolation } = require('./lib/db');
 const { applyPolicy } = require('./lib/policy');
 const { getSessionUser, getSessionToken, getRequestUser, getBearerToken, sessionCookie, clearSessionCookie, readJson } = require('./lib/auth');
 const { scheduleGenerate } = require('./lib/scheduler');
-const { zipStore } = require('./lib/zip');
+const { zipStore, zipStoreChunks } = require('./lib/zip');
 const { officialToSiteRequest, fakeOpusSubscription } = require('./lib/nai-compat');
+const { createThumbnailer } = require('./lib/thumbs');
 
 const PORT = Number(process.env.PORT || 7860);
 const HOST = process.env.HOST || '127.0.0.1';
 const IMG_DIR = process.env.NAI_IMG_DIR || path.join(__dirname, 'data', 'images');
 fs.mkdirSync(IMG_DIR, { recursive: true, mode: 0o700 });
 try { fs.chmodSync(IMG_DIR, 0o700); } catch {}
+// 缩略图与原图分目录存放：原图备份脚本递归 rclone copy 原图目录，不应带上缩略图
+const THUMB_DIR = process.env.NAI_THUMB_DIR || path.join(path.dirname(IMG_DIR), 'thumbs');
+const thumbs = createThumbnailer({ imgDir: IMG_DIR, thumbDir: THUMB_DIR });
 
 ensureAdmin();
 qSessions.delExpired();
@@ -83,10 +90,35 @@ function writeHead(res, code, headers = {}) {
   }
   res.writeHead(code, { ...SECURITY_HEADERS, ...cors, ...headers });
 }
+/** 按 Accept-Encoding 选压缩算法（br 优先） */
+function pickEncoding(req) {
+  const accept = String(req?.headers['accept-encoding'] || '');
+  if (/\bbr\b/.test(accept)) return 'br';
+  if (/\bgzip\b/.test(accept)) return 'gzip';
+  return null;
+}
+
+// 小响应压缩不划算；大响应（历史列表、插件 base64 图）放线程池异步压缩，不阻塞事件循环。
+const JSON_COMPRESS_MIN_BYTES = 2048;
 const json = (res, code, obj) => {
-  const body = JSON.stringify(obj);
-  writeHead(res, code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(body);
+  const body = Buffer.from(JSON.stringify(obj));
+  const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+  const enc = body.length >= JSON_COMPRESS_MIN_BYTES ? pickEncoding(res.req) : null;
+  if (!enc) {
+    writeHead(res, code, headers);
+    return res.end(body);
+  }
+  const done = (error, out) => {
+    if (res.headersSent || res.destroyed) return;
+    if (error) {
+      writeHead(res, code, headers);
+      return res.end(body);
+    }
+    writeHead(res, code, { ...headers, 'Content-Encoding': enc, 'Vary': 'Accept-Encoding', 'Content-Length': out.length });
+    res.end(out);
+  };
+  if (enc === 'br') zlib.brotliCompress(body, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }, done);
+  else zlib.gzip(body, { level: 6 }, done);
 };
 const ok = (res, obj) => json(res, 200, { ok: true, ...obj });
 const fail = (res, code, error) => json(res, code, { ok: false, error });
@@ -112,6 +144,65 @@ function serveFile(req, res, file, type, immutable = false) {
   });
 }
 
+/* ─── 前端静态资源：预压缩 + 内容哈希 URL ─────────────────
+ * index.html 中的 /app.js、/style.css 被改写为带 ?v=<哈希> 的地址，命中当前哈希时可永久缓存；
+ * 每次请求比对文件 size/mtime，改了前端文件无需重启即可生效。 */
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const STATIC_TYPES = {
+  'index.html': 'text/html; charset=utf-8',
+  'app.js': 'application/javascript; charset=utf-8',
+  'style.css': 'text/css; charset=utf-8',
+};
+let staticBundle = null;
+
+function buildStaticAsset(raw, type) {
+  return {
+    type,
+    hash: crypto.createHash('sha256').update(raw).digest('hex').slice(0, 12),
+    identity: raw,
+    gzip: zlib.gzipSync(raw, { level: 9 }),
+    br: zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } }),
+  };
+}
+
+function loadStaticBundle() {
+  const stamp = Object.keys(STATIC_TYPES).map((name) => {
+    const st = fs.statSync(path.join(PUBLIC_DIR, name));
+    return `${name}:${st.size}:${st.mtimeMs}`;
+  }).join('|');
+  if (staticBundle?.stamp === stamp) return staticBundle;
+  const assets = {};
+  for (const name of ['app.js', 'style.css']) {
+    assets[name] = buildStaticAsset(fs.readFileSync(path.join(PUBLIC_DIR, name)), STATIC_TYPES[name]);
+  }
+  const html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
+    .replace('href="/style.css"', `href="/style.css?v=${assets['style.css'].hash}"`)
+    .replace('src="/app.js"', `src="/app.js?v=${assets['app.js'].hash}"`);
+  assets['index.html'] = buildStaticAsset(Buffer.from(html), STATIC_TYPES['index.html']);
+  staticBundle = { stamp, assets };
+  return staticBundle;
+}
+
+function serveStatic(req, res, name, version) {
+  const asset = loadStaticBundle().assets[name];
+  const immutable = name !== 'index.html' && version === asset.hash;
+  const etag = `W/"${asset.hash}"`;
+  const headers = {
+    'Content-Type': asset.type,
+    'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+    'ETag': etag,
+    'Vary': 'Accept-Encoding',
+  };
+  if (req.headers['if-none-match'] === etag) {
+    writeHead(res, 304, headers);
+    return res.end();
+  }
+  const enc = pickEncoding(req);
+  const body = enc ? asset[enc] : asset.identity;
+  writeHead(res, 200, { ...headers, ...(enc ? { 'Content-Encoding': enc } : {}), 'Content-Length': body.length });
+  res.end(body);
+}
+
 async function removeGeneratedFile(file) {
   if (!file || path.basename(file) !== file) return;
   try {
@@ -119,12 +210,23 @@ async function removeGeneratedFile(file) {
   } catch (error) {
     if (error.code !== 'ENOENT') console.error('[image-cleanup]', file, error);
   }
+  await thumbs.remove(file);
 }
 
 async function persistPng(buf, index = 0) {
   const fname = `${Date.now()}-${index}-${crypto.randomBytes(4).toString('hex')}.png`;
   await fs.promises.writeFile(path.join(IMG_DIR, fname), buf, { mode: 0o600 });
+  thumbs.generate(fname); // 后台预生成缩略图，历史/画廊刷新时通常已就绪
   return fname;
+}
+
+/** 生成图属主或管理员可见；返回安全的文件名，无权时返回 null */
+function authorizedImageFile(req, rawName) {
+  const file = path.basename(rawName);
+  const rec = qGens.byFile(file);
+  const u = getRequestUser(req);
+  if (!rec || !u || (u.user_id !== rec.user_id && u.role !== 'admin')) return null;
+  return file;
 }
 
 async function finishGenerationFile(genId, buf, anlas, t0, index = 0) {
@@ -142,6 +244,20 @@ function parseLimit(value, fallback, max) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) return fallback;
   return Math.max(1, Math.min(max, parsed));
+}
+
+// 与画廊单次最多载入条数一致；同时避免超出 SQLite 绑定变量上限与超大 ZIP。
+const MAX_BATCH_IDS = 500;
+function parseIdList(ids) {
+  if (!Array.isArray(ids) || !ids.length) return { error: 'ids 不能为空' };
+  if (ids.length > MAX_BATCH_IDS) return { error: `单次最多操作 ${MAX_BATCH_IDS} 项` };
+  return { ids: [...new Set(ids.map(Number).filter(n => Number.isInteger(n) && n > 0))] };
+}
+
+// 官方客户端可能把站点 origin 当作 api/image 两个域名的根，因此也接受去掉 /ai 前缀的路径
+const PLUGIN_ROOT_ALIASES = new Set(['/user/subscription', '/generate-image', '/encode-vibe']);
+function isPluginPath(p) {
+  return p === '/api/v1' || p.startsWith('/api/v1/') || p === '/ai' || p.startsWith('/ai/') || PLUGIN_ROOT_ALIASES.has(p);
 }
 
 async function requireAdmin(req, res) {
@@ -191,6 +307,18 @@ async function sendGenerateOk(res, user, payload, urls) {
   return ok(res, { ...payload, image: b64[0] || null, images: b64, url: urls[0], urls });
 }
 
+const SUB_REFRESH_MIN_INTERVAL_MS = 60 * 1000;
+const subRefreshAt = new Map();
+/** 生图后刷新该 key 的电量/Anlas；同一 key 每分钟最多一次，避免每张图都多打上游接口 */
+function refreshKeySubscription(key) {
+  const now = Date.now();
+  if (now - (subRefreshAt.get(key.id) || 0) < SUB_REFRESH_MIN_INTERVAL_MS) return;
+  subRefreshAt.set(key.id, now);
+  new NaiClient(key.token).getSubscription({ withInfo: false })
+    .then(sub => qKeys.setState(key.id, 'ok', sub.tier, sub.anlas, sub.v5Battery))
+    .catch(() => {});
+}
+
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_PER_ACCOUNT = 5;
 const LOGIN_MAX_PER_IP = 20;
@@ -202,12 +330,16 @@ const PLUGIN_GEN_WINDOW_MS = 60 * 1000;
 const PLUGIN_GEN_MAX = Math.max(1, Number(process.env.PLUGIN_GEN_MAX || 20));
 const pluginGenHits = new Map();
 
+// 本机前面有几层可信反向代理：只有 nginx 为 1（默认）；Cloudflare → nginx 为 2；不经代理设 0。
+const TRUST_PROXY_HOPS = Math.max(0, Math.trunc(Number(process.env.TRUST_PROXY_HOPS ?? 1)) || 0);
 function clientIp(req) {
   const remote = req.socket.remoteAddress || '';
-  const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === ':ffff:127.0.0.1';
-  if (isLocal) {
-    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (forwarded) return forwarded.slice(0, 128);
+  const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  if (isLocal && TRUST_PROXY_HOPS > 0) {
+    // 每层代理在末尾追加它看到的来源地址，最左侧的条目可被客户端伪造；
+    // 从右往左数第 N 个才是最外层可信代理看到的真实客户端。
+    const chain = String(req.headers['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (chain.length) return chain[Math.max(0, chain.length - TRUST_PROXY_HOPS)].slice(0, 128);
   }
   return remote || 'unknown';
 }
@@ -354,11 +486,7 @@ async function handleAdmittedGenerate(req, res, user, preBody) {
     }
     qKeys.markUsed(key.id);
     // 若是 V5 模型，后台异步轻量拉取该 key 最新剩余电量与 Anlas，不阻塞生图返回
-    if (payload.model?.startsWith('nai-diffusion-5')) {
-      new NaiClient(key.token).getSubscription()
-        .then(sub => qKeys.setState(key.id, 'ok', sub.tier, sub.anlas, sub.v5Battery))
-        .catch(() => {});
-    }
+    if (payload.model?.startsWith('nai-diffusion-5')) refreshKeySubscription(key);
     return sendGenerateOk(res, user, {
       image: urls[0],
       images: urls,
@@ -503,10 +631,9 @@ async function handleAnlas(res) {
       };
       anlasCache = { expiresAt: Date.now() + 30000, data };
       return data;
-    })();
+    })().finally(() => { anlasRefreshPromise = null; });
   }
-  try { return ok(res, await anlasRefreshPromise); }
-  finally { anlasRefreshPromise = null; }
+  return ok(res, await anlasRefreshPromise);
 }
 /* ─── 路由 ─────────────────────────────────────────────── */
 
@@ -526,7 +653,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, ready ? 200 : 503, { ok: ready, db: dbOk, disk: diskOk, keys });
     }
 
-    if (p.startsWith('/api/v1') || p.startsWith('/ai')) {
+    if (isPluginPath(p)) {
       applyPluginCors(res);
       if (req.method === 'OPTIONS') {
         writeHead(res, 204);
@@ -563,23 +690,26 @@ const server = http.createServer(async (req, res) => {
       if ((p === '/ai/encode-vibe' || p === '/encode-vibe') && req.method === 'POST') {
         return fail(res, 404, '本站不支持 vibe 编码，请在柏宝绘渠道关闭 Vibe Transfer');
       }
-      if (p.startsWith('/api/v1') || p.startsWith('/ai')) {
-        return fail(res, 404, '未知插件接口');
-      }
+      return fail(res, 404, '未知插件接口');
     }
 
 
     /* 静态 */
-    if (req.method === 'GET' && p === '/') return serveFile(req, res, path.join(__dirname, 'public', 'index.html'), 'text/html; charset=utf-8');
-    if (req.method === 'GET' && p === '/style.css') return serveFile(req, res, path.join(__dirname, 'public', 'style.css'), 'text/css; charset=utf-8');
-    if (req.method === 'GET' && p === '/app.js') return serveFile(req, res, path.join(__dirname, 'public', 'app.js'), 'application/javascript; charset=utf-8');
+    if (req.method === 'GET' && p === '/') return serveStatic(req, res, 'index.html');
+    if (req.method === 'GET' && (p === '/style.css' || p === '/app.js')) return serveStatic(req, res, p.slice(1), url.searchParams.get('v'));
 
     /* 图片（属主或管理员可见） */
     if (req.method === 'GET' && p.startsWith('/img/')) {
-      const file = path.basename(p.slice(5));
-      const rec = qGens.byFile(file);
-      const u = getRequestUser(req);
-      if (!rec || !u || (u.user_id !== rec.user_id && u.role !== 'admin')) return fail(res, 404, '无权访问');
+      const file = authorizedImageFile(req, p.slice(5));
+      if (!file) return fail(res, 404, '无权访问');
+      return serveFile(req, res, path.join(IMG_DIR, file), 'image/png', true);
+    }
+    /* 缩略图：网格/画廊用，约为原图体积的 1/15；无法生成时回退原图 */
+    if (req.method === 'GET' && p.startsWith('/thumb/')) {
+      const file = authorizedImageFile(req, p.slice(7));
+      if (!file) return fail(res, 404, '无权访问');
+      const thumb = await thumbs.get(file);
+      if (thumb) return serveFile(req, res, thumb.path, thumb.type, true);
       return serveFile(req, res, path.join(IMG_DIR, file), 'image/png', true);
     }
 
@@ -592,7 +722,7 @@ const server = http.createServer(async (req, res) => {
         return fail(res, 429, '登录失败次数过多，请 15 分钟后重试');
       }
       const u = qUsers.byName(normalizedUsername);
-      const passwordValid = verifyLoginPassword(String(password || ''), u?.password_hash);
+      const passwordValid = await verifyLoginPassword(String(password || ''), u?.password_hash);
       if (!u || u.disabled || !passwordValid) {
         recordLoginFailure(failureKeys.account);
         recordLoginFailure(failureKeys.ip);
@@ -605,8 +735,8 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: true, username: u.username, role: u.role }));
     }
     if (p === '/api/auth/logout' && req.method === 'POST') {
-      const m = (req.headers.cookie || '').match(/nai_session=([^;]+)/);
-      if (m) qSessions.del(decodeURIComponent(m[1]));
+      const token = getSessionToken(req);
+      if (token) qSessions.del(token);
       writeHead(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': clearSessionCookie() });
       return res.end(JSON.stringify({ ok: true }));
     }
@@ -628,6 +758,9 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/user/profile' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
       const { newUsername, newPassword, oldPassword } = await readJson(req, 8192);
+      if ((newPassword && typeof newPassword !== 'string') || (newUsername && typeof newUsername !== 'string')) {
+        return fail(res, 400, '参数格式错误');
+      }
       const cur = qUsers.byId(user.user_id);
       const fullCur = qUsers.byName(cur.username);
       if (newPassword) {
@@ -675,8 +808,13 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/history' && req.method === 'GET') {
       if (!user) return fail(res, 401, '未登录');
       const limit = parseLimit(url.searchParams.get('limit'), 60, 500);
-      const favOnly = url.searchParams.get('favorite') === '1';
-      const rows = qGens.byUser(user.user_id, limit, favOnly);
+      const before = Number(url.searchParams.get('before'));
+      const okOnly = url.searchParams.get('ok') === '1';
+      const rows = qGens.byUser(user.user_id, limit, {
+        favoritedOnly: url.searchParams.get('favorite') === '1',
+        okOnly,
+        before,
+      });
       const items = rows.map((r) => {
         let charPrompts = [];
         if (r.char_prompts) {
@@ -684,7 +822,10 @@ const server = http.createServer(async (req, res) => {
         }
         return { ...r, is_favorited: !!r.is_favorited, charPrompts: Array.isArray(charPrompts) ? charPrompts : [] };
       });
-      return ok(res, { items });
+      const nextBefore = rows.length === limit ? rows[rows.length - 1].id : null;
+      // 画廊首屏顺带返回总数/收藏数，用于筛选标签计数
+      const counts = okOnly && !(before > 0) ? qGens.countGalleryByUser(user.user_id) : undefined;
+      return ok(res, { items, nextBefore, counts });
     }
 
     let histMatch;
@@ -702,46 +843,52 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/history/batch-favorite' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
       const { ids, state } = await readJson(req, 64 * 1024);
-      if (!Array.isArray(ids) || !ids.length) return fail(res, 400, 'ids 不能为空');
-      const validIds = ids.map(Number).filter(n => Number.isInteger(n) && n > 0);
-      qGens.batchFavorite(validIds, user.user_id, state !== false);
-      return ok(res, { count: validIds.length });
+      const parsed = parseIdList(ids);
+      if (parsed.error) return fail(res, 400, parsed.error);
+      qGens.batchFavorite(parsed.ids, user.user_id, state !== false);
+      return ok(res, { count: parsed.ids.length });
     }
 
     if (p === '/api/history/batch-delete' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
-      const { ids } = await readJson(req, 64 * 1024);
-      if (!Array.isArray(ids) || !ids.length) return fail(res, 400, 'ids 不能为空');
-      const validIds = ids.map(Number).filter(n => Number.isInteger(n) && n > 0);
-      const { files, changes } = qGens.batchDelByUser(validIds, user.user_id);
+      const parsed = parseIdList((await readJson(req, 64 * 1024)).ids);
+      if (parsed.error) return fail(res, 400, parsed.error);
+      const { files, changes } = qGens.batchDelByUser(parsed.ids, user.user_id);
       await Promise.all(files.map(removeGeneratedFile));
       return ok(res, { deleted: changes });
     }
 
     if (p === '/api/history/batch-download' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
-      const { ids } = await readJson(req, 64 * 1024);
-      if (!Array.isArray(ids) || !ids.length) return fail(res, 400, 'ids 不能为空');
-      const validIds = ids.map(Number).filter(n => Number.isInteger(n) && n > 0);
-      const items = qGens.getFilesByIds(validIds, user.user_id);
+      const parsed = parseIdList((await readJson(req, 64 * 1024)).ids);
+      if (parsed.error) return fail(res, 400, parsed.error);
+      const items = qGens.getFilesByIds(parsed.ids, user.user_id);
       if (!items.length) return fail(res, 404, '未找到可下载图片');
-      const files = [];
+      const present = [];
       for (const it of items) {
         const fname = path.basename(String(it.file));
-        if (!fname || fname.includes('/') || fname.includes('\\')) continue;
+        if (!fname || fname.includes('\\')) continue;
         try {
-          const buf = await fs.promises.readFile(path.join(IMG_DIR, fname));
-          files.push({ name: `nai-${it.seed || it.id}.png`, data: buf });
+          if ((await fs.promises.stat(path.join(IMG_DIR, fname))).isFile()) present.push({ ...it, fname });
         } catch {}
       }
-      if (!files.length) return fail(res, 404, '图片文件缺失');
-      const zip = zipStore(files);
+      if (!present.length) return fail(res, 404, '图片文件缺失');
+      // 逐张读取并流式写出，避免把几百张原图同时攒进内存；文件名带 id 防同种子重名。
+      async function* entries() {
+        for (const it of present) {
+          let data;
+          try { data = await fs.promises.readFile(path.join(IMG_DIR, it.fname)); } catch { continue; }
+          yield { name: it.seed != null ? `nai-${it.seed}-${it.id}.png` : `nai-${it.id}.png`, data };
+        }
+      }
       writeHead(res, 200, {
         'Content-Type': 'application/zip',
-        'Content-Length': zip.length,
+        'Cache-Control': 'no-store',
         'Content-Disposition': `attachment; filename="nai-batch-${Date.now()}.zip"`,
       });
-      return res.end(zip);
+      // 客户端中途断开时 pipeline 会拒绝；响应头已发出，只需丢弃连接。
+      await pipeline(Readable.from(zipStoreChunks(entries())), res).catch(() => res.destroy());
+      return;
     }
 
     if (p.startsWith('/api/history/') && req.method === 'DELETE') {
@@ -1022,11 +1169,10 @@ const server = http.createServer(async (req, res) => {
         return ok(res, { stats: { ...s, activeKeys: qKeys.count(), users: qUsers.count() } });
       }
       if (p === '/api/admin/keys/test-all' && req.method === 'POST') {
-        const list = qKeys.list();
-        const results = [];
-        for (const k of list) {
+        // 并发 4 路验证：串行时每个 key 最多数十秒，池子一大就会超时
+        const settled = await mapWithConcurrency(qKeys.list(), 4, async (k) => {
           const raw = qKeys.get(k.id);
-          if (!raw) continue;
+          if (!raw) return null;
           const verify = await new NaiClient(raw.token).verifyToken();
           if (verify.ok) {
             qKeys.setState(k.id, 'ok', verify.subscription.tier, verify.subscription.anlas, verify.subscription.v5Battery);
@@ -1036,9 +1182,9 @@ const server = http.createServer(async (req, res) => {
             qKeys.setState(k.id, `invalid:${verify.error}`, null, null);
             qKeys.setActive(k.id, false);
           }
-          results.push({ id: k.id, label: k.label, email: k.email || verify.subscription?.email, ok: verify.ok, anlas: verify.subscription?.anlas, v5Battery: verify.subscription?.v5Battery, tier: verify.subscription?.tierName, error: verify.error });
-        }
-        return ok(res, { results });
+          return { id: k.id, label: k.label, email: k.email || verify.subscription?.email, ok: verify.ok, anlas: verify.subscription?.anlas, v5Battery: verify.subscription?.v5Battery, tier: verify.subscription?.tierName, error: verify.error };
+        });
+        return ok(res, { results: settled.filter(Boolean) });
       }
       if (p.startsWith('/api/admin/generations/') && req.method === 'DELETE') {
         const gid = Number(p.slice(23));
@@ -1075,6 +1221,8 @@ function shutdown(signal) {
 }
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 process.once('SIGINT', () => shutdown('SIGINT'));
+
+loadStaticBundle(); // 启动时预压缩，首个访客无需等待
 
 server.listen(PORT, HOST, () => {
   console.log(`[nai-site] http://${HOST}:${PORT}  (SQLite: ${process.env.NAI_DB || path.join(__dirname, 'data', 'nai.sqlite')})`);

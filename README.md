@@ -8,6 +8,9 @@
 # 首次启动必须显式设置管理员；密码至少 12 位
 ADMIN_USER=admin ADMIN_PASS='请替换为高强度密码' node server.js
 # 由 HTTPS 反向代理访问时保持 COOKIE_SECURE=1（默认）；仅本机纯 HTTP 调试可临时设为 0
+# TRUST_PROXY_HOPS：本机前的可信代理层数，用于从 X-Forwarded-For 取真实客户端 IP（登录限速按 IP 计）
+#   只有 nginx（默认）=1；Cloudflare → nginx =2；不经代理直接暴露 =0
+# NAI_THUMB_DIR：缩略图缓存目录，默认与图片目录同级的 thumbs/（可随时删除，按需重建）
 ```
 
 打开 `http://localhost:7860`。系统不会创建或展示默认弱口令；首次启动缺少安全管理员配置时会拒绝启动。
@@ -18,7 +21,7 @@ ADMIN_USER=admin ADMIN_PASS='请替换为高强度密码' node server.js
 
 | 功能 | 管理员 | 普通用户 |
 |---|---|---|
-| 模型 | 全部（V5/V4.5/V4/V3 + inpainting 权重） | 全部 t2i 模型 |
+| 模型 | 全部（V5 / V4.5 + inpainting 权重） | 全部 t2i 模型 |
 | 尺寸 | ≤1536（任意） | **≤1024×1024 总像素** |
 | 步数 | ≤50 | **≤28** |
 | 张数 | 1–8（第 2 张起计 Anlas） | **仅 1 张** |
@@ -55,6 +58,11 @@ lib/db.js            SQLite：users / nai_keys / generations / sessions
 lib/policy.js        角色权限策略（管理员默认免费层可越界；普通用户硬锁免费层）
 lib/auth.js          Cookie 会话鉴权
 lib/scheduler.js     Key 互斥、等待队列、429 退避与租约释放
+lib/nai-compat.js    官方 /ai/generate-image 请求体 → 本站请求映射（插件兼容）
+lib/zip.js           STORED ZIP 打包（插件返回 / 画廊批量流式下载）
+lib/png.js           零依赖 PNG 解码 / 面积平均缩放 / 编码
+lib/jpeg.js          零依赖基线 JPEG 编码器（缩略图用）
+lib/thumbs.js        缩略图 worker 池 + 磁盘缓存（/thumb/:file）
 public/              前端（原生 HTML/CSS/JS，暗夜主题 + inpaint 画布工作台）
 scripts/             双云备份、空闲分类备份与 systemd 配置
 test/security-smoke.js 安全回归冒烟测试

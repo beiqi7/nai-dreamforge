@@ -112,6 +112,7 @@ async function showMain() {
   bindProfileModal();
   bindPromptLibrary();
   bindLightbox();
+  bindHistoryGrid();
   loadHistory();
   bindViewNavigation();
   bindDedicatedGallery();
@@ -119,7 +120,6 @@ async function showMain() {
   if (ME.role === 'admin') {
     bindAdminModal();
     bindComicStudio();
-    loadAdminAll();
   }
 }
 
@@ -1461,9 +1461,16 @@ function bindLightbox() {
     if (!confirm('确定从云端删除该条历史记录吗？')) return;
     try {
       await api(`/api/history/${selectedRecord.id}`, { method: 'DELETE' });
+      const removedId = selectedRecord.id;
       close();
       toast('记录已删除');
       loadHistory();
+      if (galById.has(removedId)) {
+        galCounts.all = Math.max(0, galCounts.all - 1);
+        if (galById.get(removedId).is_favorited) galCounts.fav = Math.max(0, galCounts.fav - 1);
+        updateGalCounts();
+        removeGalleryItem(removedId);
+      }
     } catch (e) { toast(e.message, true); }
   });
 
@@ -1475,13 +1482,12 @@ function bindLightbox() {
         method: 'POST',
         body: JSON.stringify({ favorited: next })
       });
-      selectedRecord.is_favorited = next;
       updateLbFavBtn(next);
       toast(next ? '已加入收藏 ❤️' : '已取消收藏 🤍');
       loadHistory();
-      if ($('dedicatedGalleryView') && !$('dedicatedGalleryView').classList.contains('hidden')) {
-        loadDedicatedGallery();
-      }
+      // 画廊里的记录可能与 selectedRecord 是同一对象，先比对再同步，计数才不会被跳过
+      if (galById.has(selectedRecord.id)) applyGalleryFavorite(selectedRecord.id, next);
+      selectedRecord.is_favorited = next;
     } catch (e) { toast(e.message, true); }
   });
   $('lbDlBtn')?.addEventListener('click', () => {
@@ -1601,7 +1607,20 @@ function openLightbox(rec) {
   resetLightboxTransform();
   const lbImg = $('lightboxImg');
   if (lbImg) {
-    lbImg.src = rec.file ? `/img/${rec.file}` : '';
+    if (!rec.file) {
+      lbImg.src = '';
+    } else {
+      // 先显示网格里已缓存的缩略图，原图解码完成后再无缝替换
+      const full = `/img/${rec.file}`;
+      const token = String(Math.random());
+      lbImg.dataset.loadToken = token;
+      lbImg.src = `/thumb/${rec.file}`;
+      const loader = new Image();
+      loader.src = full;
+      loader.decode()
+        .then(() => { if (lbImg.dataset.loadToken === token) lbImg.src = full; })
+        .catch(() => {});
+    }
   }
   $('lbPrompt').textContent = rec.prompt || '—';
   $('lbUc').textContent = rec.uc || '—';
@@ -3089,55 +3108,54 @@ function bindPromptLibrary() {
 /* ═════════════════════════════════════════════════════════════
    历史作品画廊
    ═════════════════════════════════════════════════════════════ */
-async function loadHistory() {
-  try {
-    const j = await api('/api/history?limit=60');
-    const grid = $('histGrid');
-    grid.innerHTML = '';
-    if (!j.items.length) {
-      grid.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:12px;">暂无生成记录</div>';
-      return;
-    }
-    for (const it of j.items) {
-      const cell = document.createElement('div');
-      if (it.status === 'ok' && it.file) {
-        cell.className = 'hist-cell';
-        const chars = getRecordChars(it);
-        const badgeHtml = chars.length ? `<span class="hist-badge" title="${chars.length} 个独立角色">👤×${chars.length}</span>` : '';
-        const favBadge = it.is_favorited ? `<span class="hist-fav-badge" title="已收藏">❤️</span>` : '';
-        cell.innerHTML = `
+let historyById = new Map();
+
+function historyCellHtml(it) {
+  if (it.status !== 'ok' || !it.file) {
+    return `<div class="hist-cell failed">${esc(it.error ? `✗ ${it.error.slice(0, 50)}` : '✗ 失败')}</div>`;
+  }
+  const chars = getRecordChars(it);
+  const badgeHtml = chars.length ? `<span class="hist-badge" title="${chars.length} 个独立角色">👤×${chars.length}</span>` : '';
+  const favBadge = it.is_favorited ? `<span class="hist-fav-badge" title="已收藏">❤️</span>` : '';
+  return `<div class="hist-cell" data-id="${it.id}" title="${esc(`点击查看大图与参数\n${it.prompt}`)}">
           ${badgeHtml}
           ${favBadge}
-          <img src="/img/${esc(it.file)}" loading="lazy">
+          <img src="/thumb/${esc(it.file)}" loading="lazy" decoding="async">
           <div class="hist-overlay">
             <button type="button" class="btn tiny ghost-btn hist-quick-reuse" title="复用参数">⚙️</button>
             <button type="button" class="btn tiny ghost-btn hist-quick-dl" title="下载原图">⬇</button>
           </div>
-          <div class="cap">${esc(it.model.replace('nai-diffusion-', ''))} · ${it.width}×${it.height}</div>`;
-        cell.title = `点击查看大图与参数\n${it.prompt}`;
-        cell.addEventListener('click', (e) => {
-          if (e.target.closest('.hist-quick-reuse')) {
-            e.stopPropagation();
-            reuseAllParams(it);
-            toast('已复用该图参数');
-            return;
-          }
-          if (e.target.closest('.hist-quick-dl')) {
-            e.stopPropagation();
-            const a = document.createElement('a');
-            a.href = `/img/${it.file}`;
-            a.download = `nai-${it.seed || 'image'}.png`;
-            a.click();
-            return;
-          }
-          openLightbox(it);
-        });
-      } else {
-        cell.className = 'hist-cell failed';
-        cell.textContent = it.error ? `✗ ${it.error.slice(0, 50)}` : '✗ 失败';
-      }
-      grid.appendChild(cell);
+          <div class="cap">${esc(it.model.replace('nai-diffusion-', ''))} · ${it.width}×${it.height}</div>
+        </div>`;
+}
+
+/** 历史网格点击统一委托：复用参数 / 下载原图 / 打开灯箱 */
+function bindHistoryGrid() {
+  $('histGrid').addEventListener('click', (e) => {
+    const it = historyById.get(Number(e.target.closest('.hist-cell[data-id]')?.dataset.id));
+    if (!it) return;
+    if (e.target.closest('.hist-quick-reuse')) {
+      reuseAllParams(it);
+      toast('已复用该图参数');
+    } else if (e.target.closest('.hist-quick-dl')) {
+      const a = document.createElement('a');
+      a.href = `/img/${it.file}`;
+      a.download = `nai-${it.seed || 'image'}.png`;
+      a.click();
+    } else {
+      openLightbox(it);
     }
+  });
+}
+
+async function loadHistory() {
+  try {
+    const j = await api('/api/history?limit=60');
+    const grid = $('histGrid');
+    historyById = new Map(j.items.map((it) => [it.id, it]));
+    grid.innerHTML = j.items.length
+      ? j.items.map(historyCellHtml).join('')
+      : '<div style="color:var(--text-dim);font-size:12px;padding:12px;">暂无生成记录</div>';
   } catch {}
 }
 
@@ -3205,9 +3223,21 @@ async function showAnlasModal() {
 function bindAdminModal() {
   $('adminOpenBtn').addEventListener('click', () => {
     $('adminModal').classList.remove('hidden');
-    loadAdminAll();
+    loadActiveAdminTab();
   });
   $('adminCloseBtn').addEventListener('click', () => $('adminModal').classList.add('hidden'));
+  $('gensTbl').querySelector('tbody').addEventListener('click', (e) => {
+    const g = adminGensById.get(Number(e.target.closest('tr[data-id]')?.dataset.id));
+    if (!g) return;
+    if (e.target.closest('.thumb')) {
+      openLightbox(g);
+    } else if (e.target.closest('.act-del-gen')) {
+      if (!confirm('确定删除此全站记录？')) return;
+      api(`/api/admin/generations/${g.id}`, { method: 'DELETE' })
+        .then(() => { toast('已删除记录'); loadGens(); loadStats(); })
+        .catch((err) => toast(err.message, true));
+    }
+  });
   $('adminModal').addEventListener('click', (e) => {
     if (e.target === $('adminModal')) $('adminModal').classList.add('hidden');
   });
@@ -3226,6 +3256,7 @@ function bindAdminModal() {
       tab.classList.add('active');
       document.querySelectorAll('.tab-pane').forEach((p) => p.classList.add('hidden'));
       $(`tab-${tab.dataset.tab}`).classList.remove('hidden');
+      loadActiveAdminTab();
     });
   });
 
@@ -3323,8 +3354,11 @@ function bindAdminModal() {
   });
 }
 
-async function loadAdminAll() {
-  await Promise.all([loadKeys(), loadUsers(), loadGens(), loadStats(), loadPluginTokens()]);
+/** 管理后台按需加载：只拉取当前可见的标签页（原先登录即拉 5 个接口并渲染 200 行记录表） */
+function loadActiveAdminTab() {
+  const loaders = { keys: loadKeys, users: loadUsers, gens: loadGens, stats: loadStats, plugin: loadPluginTokens };
+  const active = document.querySelector('#adminModal .admin-tab-nav .nav-tab.active')?.dataset.tab || 'keys';
+  return loaders[active]?.();
 }
 
 async function loadKeys() {
@@ -3476,14 +3510,13 @@ async function loadUsers() {
   } catch {}
 }
 
+let adminGensById = new Map();
 async function loadGens() {
   try {
     const j = await api('/api/admin/generations?limit=200');
-    const tb = $('gensTbl').querySelector('tbody');
-    tb.innerHTML = '';
-    for (const g of j.items) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
+    adminGensById = new Map(j.items.map((g) => [g.id, g]));
+    // 整表拼成一段 HTML 一次写入，点击统一委托（见 bindAdminModal），不再逐行建节点、绑监听
+    $('gensTbl').querySelector('tbody').innerHTML = j.items.map((g) => `<tr data-id="${g.id}">
         <td>${g.id}</td><td>${esc(g.username)}</td>
         <td>${esc(g.model.replace('nai-diffusion-', ''))}</td>
         <td>${g.width}×${g.height}</td><td>${g.steps}</td>
@@ -3492,18 +3525,8 @@ async function loadGens() {
         <td>${g.duration_ms ? (g.duration_ms / 1000).toFixed(1) + 's' : '—'}</td>
         <td>${esc(g.created_at)}</td>
         <td class="prompt-cell" title="${esc(g.prompt)}">${esc(g.prompt)}</td>
-        <td>${g.file ? `<img class="thumb" src="/img/${esc(g.file)}" loading="lazy" style="cursor:pointer;" title="点击打开灯箱">` : '—'}</td>
-        <td><button class="btn tiny ghost-btn act-del-gen" style="color:var(--err)">删除</button></td>`;
-      const thumb = tr.querySelector('.thumb');
-      if (thumb) thumb.addEventListener('click', () => openLightbox(g));
-      tr.querySelector('.act-del-gen').addEventListener('click', () => {
-        if (!confirm('确定删除此全站记录？')) return;
-        api(`/api/admin/generations/${g.id}`, { method: 'DELETE' })
-          .then(() => { toast('已删除记录'); loadGens(); loadStats(); })
-          .catch((e) => toast(e.message, true));
-      });
-      tb.appendChild(tr);
-    }
+        <td>${g.file ? `<img class="thumb" src="/thumb/${esc(g.file)}" loading="lazy" decoding="async" style="cursor:pointer;" title="点击打开灯箱">` : '—'}</td>
+        <td><button class="btn tiny ghost-btn act-del-gen" style="color:var(--err)">删除</button></td></tr>`).join('');
   } catch {}
 }
 
@@ -3657,9 +3680,21 @@ function bindViewNavigation() {
 /* ═════════════════════════════════════════════════════════════
    单独个人作品画廊业务逻辑 (Dedicated Gallery Workflow)
    ═════════════════════════════════════════════════════════════ */
-let galItems = [];
-let galFilter = 'all'; // 'all' | 'fav'
+const GAL_PAGE_SIZE = 60;
+let galItems = [];            // 当前筛选下已载入的记录（按 id 倒序）
+const galById = new Map();
+let galFilter = 'all';        // 'all' | 'fav'
 let galSelectedIds = new Set();
+let galNextBefore = null;     // 下一页游标；null 表示已到底
+let galLoadSeq = 0;           // 切换筛选/刷新时递增，丢弃过期响应
+let galPagePromise = null;
+let galObserver = null;
+const galCounts = { all: 0, fav: 0 };
+
+function updateGalCounts() {
+  if ($('galCountAll')) $('galCountAll').textContent = galCounts.all;
+  if ($('galCountFav')) $('galCountFav').textContent = galCounts.fav;
+}
 
 function updateGalToolbar() {
   const count = galSelectedIds.size;
@@ -3668,71 +3703,104 @@ function updateGalToolbar() {
     badge.classList.toggle('hidden', count === 0);
     badge.textContent = `已选 ${count} 项`;
   }
-  const favBtn = $('galBatchFavBtn');
-  const unfavBtn = $('galBatchUnfavBtn');
-  const dlBtn = $('galBatchDlBtn');
-  const delBtn = $('galBatchDelBtn');
-
-  const disabled = count === 0;
-  if (favBtn) favBtn.disabled = disabled;
-  if (unfavBtn) unfavBtn.disabled = disabled;
-  if (dlBtn) dlBtn.disabled = disabled;
-  if (delBtn) delBtn.disabled = disabled;
-
-  const chkAll = $('galSelectAll');
-  const visibleIds = getVisibleGalItems().map(it => it.id);
-  if (chkAll) {
-    chkAll.checked = visibleIds.length > 0 && visibleIds.every(id => galSelectedIds.has(id));
+  for (const id of ['galBatchFavBtn', 'galBatchUnfavBtn', 'galBatchDlBtn', 'galBatchDelBtn']) {
+    if ($(id)) $(id).disabled = count === 0;
   }
+  const chkAll = $('galSelectAll');
+  if (chkAll) chkAll.checked = galItems.length > 0 && galItems.every(it => galSelectedIds.has(it.id));
 }
 
-function getVisibleGalItems() {
-  return galFilter === 'fav' ? galItems.filter(it => it.is_favorited) : galItems;
+function galEmptyHtml() {
+  const text = galFilter === 'fav' ? '暂无收藏图片，点击卡片右上角 ❤️ 即可收藏' : '暂无已生成的作品记录';
+  return `<div class="lib-empty">${text}</div>`;
 }
 
+function galSentinel() {
+  let el = $('galSentinel');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'galSentinel';
+    el.className = 'gal-sentinel';
+    $('galGrid').after(el);
+  }
+  return el;
+}
+
+function updateGalSentinel() {
+  const el = galSentinel();
+  el.textContent = galNextBefore ? '加载更多…' : (galItems.length > GAL_PAGE_SIZE ? '— 已经到底了 —' : '');
+}
+
+/** 重新载入第一页（打开画廊、切换筛选、刷新、批量删除后） */
 async function loadDedicatedGallery() {
   const grid = $('galGrid');
   if (!grid) return;
-  try {
-    const res = await api('/api/history?limit=500');
-    galItems = (res.items || []).filter(it => it.status === 'ok' && it.file);
-
-    const allCount = galItems.length;
-    const favCount = galItems.filter(it => it.is_favorited).length;
-    if ($('galCountAll')) $('galCountAll').textContent = allCount;
-    if ($('galCountFav')) $('galCountFav').textContent = favCount;
-
-    // 清除失效的勾选项
-    const currentIds = new Set(galItems.map(it => it.id));
-    for (const id of galSelectedIds) {
-      if (!currentIds.has(id)) galSelectedIds.delete(id);
-    }
-    renderDedicatedGallery();
-  } catch (err) {
-    grid.innerHTML = `<div class="lib-empty" style="color:var(--err)">画廊载入失败：${esc(err.message)}</div>`;
+  const seq = ++galLoadSeq;
+  galNextBefore = null;
+  if (!galItems.length) grid.innerHTML = '<div class="lib-empty">正在加载画廊作品…</div>';
+  await fetchGalleryPage(seq, null);
+  if (seq === galLoadSeq && galSentinelNearViewport()) loadMoreGallery();
+  if (!galObserver && 'IntersectionObserver' in window) {
+    // 提前 800px 预取下一页，滚动时不出现空白等待
+    galObserver = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) loadMoreGallery();
+    }, { rootMargin: '800px 0px' });
+    galObserver.observe(galSentinel());
   }
 }
 
-function renderDedicatedGallery() {
+/** IntersectionObserver 只在相交状态“变化”时触发；页面很高或卡片被移除后需主动补查 */
+function galSentinelNearViewport() {
+  const el = $('galSentinel');
+  if (!el || $('dedicatedGalleryView')?.classList.contains('hidden')) return false;
+  return el.getBoundingClientRect().top < window.innerHeight + 800;
+}
+
+function loadMoreGallery() {
+  if (!galNextBefore || galPagePromise) return;
+  const seq = galLoadSeq;
+  galPagePromise = fetchGalleryPage(seq, galNextBefore).finally(() => {
+    galPagePromise = null;
+    if (seq === galLoadSeq && galSentinelNearViewport()) loadMoreGallery();
+  });
+}
+
+async function fetchGalleryPage(seq, before) {
   const grid = $('galGrid');
-  if (!grid) return;
-  grid.innerHTML = '';
-  const visible = getVisibleGalItems();
-
-  if (!visible.length) {
-    const emptyText = galFilter === 'fav' ? '暂无收藏图片，点击卡片右上角 ❤️ 即可收藏' : '暂无已生成的作品记录';
-    grid.innerHTML = `<div class="lib-empty">${emptyText}</div>`;
+  const params = new URLSearchParams({ limit: String(GAL_PAGE_SIZE), ok: '1' });
+  if (galFilter === 'fav') params.set('favorite', '1');
+  if (before) params.set('before', String(before));
+  try {
+    const res = await api(`/api/history?${params}`);
+    if (seq !== galLoadSeq) return; // 期间筛选已切换
+    const items = res.items || [];
+    if (res.counts) {
+      galCounts.all = res.counts.total;
+      galCounts.fav = res.counts.favorited;
+      updateGalCounts();
+    }
+    if (!before) {
+      galItems = [];
+      galById.clear();
+      grid.innerHTML = '';
+    }
+    galNextBefore = res.nextBefore || null;
+    appendGalleryCards(items);
+    if (!galItems.length) grid.innerHTML = galEmptyHtml();
+    // 清除已不在当前列表中的勾选项（仅首屏时整体校正）
+    if (!before) for (const id of galSelectedIds) if (!galById.has(id)) galSelectedIds.delete(id);
     updateGalToolbar();
-    return;
+    updateGalSentinel();
+  } catch (err) {
+    if (seq !== galLoadSeq) return;
+    if (!before) grid.innerHTML = `<div class="lib-empty" style="color:var(--err)">画廊载入失败：${esc(err.message)}</div>`;
+    else toast(`加载更多失败：${err.message}`, true);
   }
+}
 
-  for (const it of visible) {
-    const card = document.createElement('div');
-    const isSel = galSelectedIds.has(it.id);
-    card.className = `gal-card${isSel ? ' selected' : ''}`;
-    card.dataset.id = it.id;
-
-    card.innerHTML = `
+function galCardHtml(it) {
+  const isSel = galSelectedIds.has(it.id);
+  return `
       <div class="gal-img-frame">
         <div class="gal-chk-wrap">
           <input type="checkbox" class="gal-item-chk" ${isSel ? 'checked' : ''}>
@@ -3740,7 +3808,7 @@ function renderDedicatedGallery() {
         <button type="button" class="gal-fav-btn${it.is_favorited ? ' active' : ''}" title="${it.is_favorited ? '取消收藏' : '加入收藏'}">
           ${it.is_favorited ? '❤️' : '🤍'}
         </button>
-        <img src="/img/${esc(it.file)}" loading="lazy" alt="画廊图片">
+        <img src="/thumb/${esc(it.file)}" loading="lazy" decoding="async" alt="画廊图片">
       </div>
       <div class="gal-card-meta">
         <div class="gal-card-prompt" title="${esc(it.prompt)}">${esc(it.prompt)}</div>
@@ -3748,46 +3816,70 @@ function renderDedicatedGallery() {
           <span class="model">${esc(it.model.replace('nai-diffusion-', ''))}</span>
           <span>${it.width}×${it.height} · ${it.steps}步</span>
         </div>
-      </div>
-    `;
-    const chk = card.querySelector('.gal-item-chk');
-    const chkWrap = card.querySelector('.gal-chk-wrap');
-    chkWrap.addEventListener('click', (e) => e.stopPropagation());
-    chk.addEventListener('change', () => {
-      if (chk.checked) galSelectedIds.add(it.id);
-      else galSelectedIds.delete(it.id);
-      card.classList.toggle('selected', chk.checked);
-      updateGalToolbar();
-    });
+      </div>`;
+}
 
-    const favBtn = card.querySelector('.gal-fav-btn');
-    favBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try {
-        const next = !it.is_favorited;
-        await api(`/api/history/${it.id}/favorite`, {
-          method: 'POST',
-          body: JSON.stringify({ favorited: next })
-        });
-        it.is_favorited = next;
-        favBtn.classList.toggle('active', next);
-        favBtn.textContent = next ? '❤️' : '🤍';
-        favBtn.title = next ? '取消收藏' : '加入收藏';
-        const favCount = galItems.filter(x => x.is_favorited).length;
-        if ($('galCountFav')) $('galCountFav').textContent = favCount;
-        if (galFilter === 'fav' && !next) card.remove();
-      } catch (err) { toast(err.message, true); }
-    });
-
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.gal-chk-wrap') || e.target.closest('.gal-fav-btn')) return;
-      openLightbox(it);
-    });
-
-    grid.appendChild(card);
+function appendGalleryCards(items) {
+  const frag = document.createDocumentFragment();
+  for (const it of items) {
+    if (galById.has(it.id)) continue;
+    galItems.push(it);
+    galById.set(it.id, it);
+    const card = document.createElement('div');
+    card.className = `gal-card${galSelectedIds.has(it.id) ? ' selected' : ''}`;
+    card.dataset.id = it.id;
+    card.innerHTML = galCardHtml(it);
+    frag.appendChild(card);
   }
+  $('galGrid').appendChild(frag);
+}
+
+function galCardEl(id) {
+  return $('galGrid')?.querySelector(`.gal-card[data-id="${Number(id)}"]`) || null;
+}
+
+function syncGalCardFav(card, it) {
+  const btn = card?.querySelector('.gal-fav-btn');
+  if (!btn) return;
+  btn.classList.toggle('active', !!it.is_favorited);
+  btn.textContent = it.is_favorited ? '❤️' : '🤍';
+  btn.title = it.is_favorited ? '取消收藏' : '加入收藏';
+}
+
+function syncGalSelection() {
+  $('galGrid')?.querySelectorAll('.gal-card').forEach((card) => {
+    const sel = galSelectedIds.has(Number(card.dataset.id));
+    card.classList.toggle('selected', sel);
+    const chk = card.querySelector('.gal-item-chk');
+    if (chk) chk.checked = sel;
+  });
   updateGalToolbar();
 }
+
+/** 从画廊状态与 DOM 中移除一条记录（灯箱删除、收藏页取消收藏时） */
+function removeGalleryItem(id) {
+  const it = galById.get(id);
+  if (!it) return;
+  galById.delete(id);
+  galItems = galItems.filter(x => x.id !== id);
+  galSelectedIds.delete(id);
+  galCardEl(id)?.remove();
+  if (!galItems.length && !galNextBefore) $('galGrid').innerHTML = galEmptyHtml();
+  updateGalToolbar();
+  if (galSentinelNearViewport()) loadMoreGallery();
+}
+
+/** 收藏状态变化后同步画廊（来自卡片按钮、灯箱或批量操作） */
+function applyGalleryFavorite(id, favorited) {
+  const it = galById.get(id);
+  if (!it || !!it.is_favorited === !!favorited) return;
+  it.is_favorited = favorited;
+  galCounts.fav = Math.max(0, galCounts.fav + (favorited ? 1 : -1));
+  updateGalCounts();
+  if (galFilter === 'fav' && !favorited) removeGalleryItem(id);
+  else syncGalCardFav(galCardEl(id), it);
+}
+
 function bindDedicatedGallery() {
   // Tab 筛选（全部 vs 仅收藏）
   document.querySelectorAll('.gallery-filter-tabs .gallery-tab').forEach(tab => {
@@ -3795,19 +3887,48 @@ function bindDedicatedGallery() {
       document.querySelectorAll('.gallery-filter-tabs .gallery-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       galFilter = tab.dataset.filter || 'all';
-      renderDedicatedGallery();
+      galItems = [];
+      galById.clear();
+      loadDedicatedGallery();
     });
   });
 
-  // 全选 / 全不选
+  // 全选 / 全不选（作用于已载入的卡片）
   $('galSelectAll')?.addEventListener('change', (e) => {
-    const visible = getVisibleGalItems();
-    if (e.target.checked) {
-      visible.forEach(it => galSelectedIds.add(it.id));
-    } else {
-      visible.forEach(it => galSelectedIds.delete(it.id));
+    for (const it of galItems) {
+      if (e.target.checked) galSelectedIds.add(it.id);
+      else galSelectedIds.delete(it.id);
     }
-    renderDedicatedGallery();
+    syncGalSelection();
+  });
+
+  // 卡片交互统一委托到网格：勾选、收藏、打开灯箱
+  const grid = $('galGrid');
+  grid?.addEventListener('change', (e) => {
+    const chk = e.target.closest('.gal-item-chk');
+    if (!chk) return;
+    const card = chk.closest('.gal-card');
+    const id = Number(card.dataset.id);
+    if (chk.checked) galSelectedIds.add(id);
+    else galSelectedIds.delete(id);
+    card.classList.toggle('selected', chk.checked);
+    updateGalToolbar();
+  });
+  grid?.addEventListener('click', async (e) => {
+    const card = e.target.closest('.gal-card');
+    if (!card) return;
+    const it = galById.get(Number(card.dataset.id));
+    if (!it || e.target.closest('.gal-chk-wrap')) return;
+    if (e.target.closest('.gal-fav-btn')) {
+      e.stopPropagation();
+      const next = !it.is_favorited;
+      try {
+        await api(`/api/history/${it.id}/favorite`, { method: 'POST', body: JSON.stringify({ favorited: next }) });
+        applyGalleryFavorite(it.id, next);
+      } catch (err) { toast(err.message, true); }
+      return;
+    }
+    openLightbox(it);
   });
 
   // 批量收藏
@@ -3819,9 +3940,9 @@ function bindDedicatedGallery() {
         method: 'POST',
         body: JSON.stringify({ ids, state: true })
       });
-      galItems.forEach(it => { if (galSelectedIds.has(it.id)) it.is_favorited = true; });
+      ids.forEach(id => applyGalleryFavorite(id, true));
       toast(`已批量收藏 ${ids.length} 项作品`);
-      renderDedicatedGallery();
+      loadHistory();
     } catch (err) { toast(err.message, true); }
   });
 
@@ -3834,9 +3955,9 @@ function bindDedicatedGallery() {
         method: 'POST',
         body: JSON.stringify({ ids, state: false })
       });
-      galItems.forEach(it => { if (galSelectedIds.has(it.id)) it.is_favorited = false; });
+      ids.forEach(id => applyGalleryFavorite(id, false));
       toast(`已取消收藏 ${ids.length} 项作品`);
-      renderDedicatedGallery();
+      loadHistory();
     } catch (err) { toast(err.message, true); }
   });
 
@@ -4000,7 +4121,7 @@ function renderComicPanels() {
     card.id = `comic-panel-${panel.id}`;
 
     const previewHtml = panel.result?.file
-      ? `<img src="/img/${esc(panel.result.file)}" alt="分镜 ${idx + 1}" title="点击查看大图">`
+      ? `<img src="/thumb/${esc(panel.result.file)}" decoding="async" alt="分镜 ${idx + 1}" title="点击查看大图">`
       : `<div class="comic-panel-empty">${panel.status === 'running' ? '⏳ 正在绘制该镜头…' : '待生成分镜'}</div>`;
 
     card.innerHTML = `
