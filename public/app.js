@@ -115,7 +115,9 @@ async function showMain() {
 
   if (ME.role === 'admin') {
     bindAdminModal();
+    bindPoolViews();
     bindComicStudio();
+    loadPoolBadge();
   }
 }
 
@@ -561,7 +563,6 @@ function bindGenerator() {
   });
 
   $('histRefresh').addEventListener('click', loadHistory);
-  $('anlasBtn').addEventListener('click', showAnlasModal);
 
   updateAnlasEstimate();
 }
@@ -2146,198 +2147,49 @@ function bindProfileModal() {
 }
 
 /* ═════════════════════════════════════════════════════════════
-   📚 提示词片段库 (Prompt Library) 核心实现
+   提示词片段库 (Prompt Library)
+   打开时一次拉取全部分类并缓存；切换分类、搜索、分组都在本地完成，
+   增删改只更新本地缓存，不再整表重拉。
    ═════════════════════════════════════════════════════════════ */
-let currentLibKind = 'painter';
-let libCache = {}; // { [kind]: Array<item> }
-let libAddFormCollapsed = true; // 添加片段卡片折叠状态，默认折叠
-const LIB_KIND_TITLES = {
-  painter: '画师串',
-  action: '动作串',
-  uc: 'UC片段',
-  character: '角色',
-  main: '主串',
+const LIB_KINDS = {
+  painter: { name: '画师串', hint: '点击卡片插入到正向提示词光标处' },
+  action: { name: '动作串', hint: '点击卡片追加到正向提示词末尾', group: '分类' },
+  uc: { name: 'UC', hint: '点击卡片插入到负面提示词 (UC)' },
+  character: { name: '角色', hint: '点击卡片添加到独立角色面板（上限 22 个）', group: '作品' },
+  main: { name: '主串', hint: '点击卡片替换整个正向提示词' },
+};
+const LIB_GROUP_ALL = '';
+const LIB_GROUP_OTHER = '其他';
+const LIB_GROUP_STORE_KEYS = { action: 'nai-action-group-tab', character: 'nai-char-ip-tab' };
+const ACTION_GROUP_ORDER = ['常用', '站立', '传教士', '侧躺', '骑乘', '后入', '特殊', '对照', '自拍', '展示', '多人', '口交', '事后', '其他'];
+/** 角色站位预设，与独立角色面板的「左 / 中 / 右」一致 */
+const LIB_POS_PRESETS = { left: { x: 0.25, y: 0.5, label: '左' }, center: { x: 0.5, y: 0.5, label: '中' }, right: { x: 0.75, y: 0.5, label: '右' } };
+
+const lib = {
+  kind: 'painter',
+  items: [],
+  limit: 500,
+  loaded: false,
+  query: '',
+  group: {},          // { [kind]: 分组名，'' 表示全部 }
+  editing: null,      // null | { id: number|null }（id 为 null 表示新建）
+  target: null,       // 调用来源（分镜工作室等）；null 表示主工作区
+  armedDelete: null,  // 第一次点删除后等待确认的条目 id
+  armedTimer: 0,
 };
 
-let libTargetContext = null; // 记录当前调用来源，例如 { type: 'comicStyle' }, { type: 'comicPanel', panelId: 1 } 等
-
-function openPromptLibrary(kind = 'painter', targetCtx = null) {
-  libTargetContext = targetCtx;
-  const modal = $('promptLibModal');
-  if (!modal) return;
-  modal.classList.remove('hidden');
-  switchPromptLibKind(kind);
+function readLibGroup(kind) {
+  if (lib.group[kind] !== undefined) return lib.group[kind];
+  try { lib.group[kind] = localStorage.getItem(LIB_GROUP_STORE_KEYS[kind]) || LIB_GROUP_ALL; } catch { lib.group[kind] = LIB_GROUP_ALL; }
+  return lib.group[kind];
 }
 
-function closePromptLibrary() {
-  closeActiveLibPopover();
-  libTargetContext = null;
-  const modal = $('promptLibModal');
-  if (modal) modal.classList.add('hidden');
-}
-
-function switchPromptLibKind(kind) {
-  currentLibKind = kind;
-  // 更新 Tab 导航高亮
-  document.querySelectorAll('#promptLibTabNav .nav-tab').forEach((tab) => {
-    tab.classList.toggle('active', tab.dataset.kind === kind);
-  });
-
-  const titleMap = {
-    painter: '添加画师串片段',
-    action: '添加动作串片段',
-    uc: '添加 UC 片段',
-    character: '添加预设角色',
-    main: '添加完整主串预设',
-  };
-  const tipMap = {
-    painter: '点击条目可选择导入或复制（导入：插入画师串位置）',
-    action: '点击条目可选择导入或复制（导入：追加动作串）',
-    uc: '点击条目可选择导入或复制（导入：插入排除元素 UC）',
-    character: '点击条目直接导入或复制（导入：追加进独立角色面板，上限 22）',
-    main: '点击条目可选择导入或复制（导入：替换提示词输入框）',
-  };
-
-  $('libFormTitle').textContent = titleMap[kind] || '添加新片段';
-  $('libFormTip').textContent = tipMap[kind] || '';
-  $('libListTitle').textContent = `已保存 ${LIB_KIND_TITLES[kind] || ''} 片段`;
-  // 切换普通模式与角色模式表单
-  const isChar = kind === 'character';
-  const useGroupTabs = isChar || kind === 'action';
-  if ($('libListTip')) {
-    $('libListTip').textContent = isChar
-      ? '先点作品 Tab，再导入或复制角色'
-      : kind === 'action'
-        ? '先点分类 Tab，再导入或复制动作'
-        : '点击条目可选择导入或复制';
-  }
-  $('libIpTabs')?.classList.toggle('hidden', !useGroupTabs);
-  if ($('libIpTabs')) {
-    $('libIpTabs').setAttribute('aria-label', isChar ? '角色作品' : kind === 'action' ? '动作分类' : '分组');
-  }
-  if (!useGroupTabs) {
-    const ipTabs = $('libIpTabs');
-    if (ipTabs) ipTabs.innerHTML = '';
-  }
-  $('libNormalContentWrap').classList.toggle('hidden', isChar);
-  $('libCharContentWrap').classList.toggle('hidden', !isChar);
-  if ($('libItemTitle')) {
-    $('libItemTitle').placeholder = kind === 'action'
-      ? '例如：传教士 | 腿扛在肩上（分类 | 名称）'
-      : '例如：水墨水彩混搭 / 战斗跳跃姿态 / 主角银发少女';
-  }
-
-  if (kind === 'uc') {
-    $('libContentLabel').textContent = '排除词内容 (Negative tags)';
-    $('libItemContent').placeholder = 'worst quality, bad anatomy, blur...';
-  } else {
-    $('libContentLabel').textContent = '提示词内容';
-    $('libItemContent').placeholder = '填写提示词内容 tags...';
-  }
-
-  $('libAddCard')?.classList.toggle('collapsed', libAddFormCollapsed);
-  fetchAndRenderLibItems(kind);
-}
-
-async function fetchAndRenderLibItems(kind) {
-  const listWrap = $('libItemsList');
-  listWrap.innerHTML = '<div class="lib-empty">正在拉取云端片段…</div>';
-
+function writeLibGroup(kind, name) {
+  lib.group[kind] = name || LIB_GROUP_ALL;
   try {
-    const res = await api(`/api/prompts?kind=${encodeURIComponent(kind)}`);
-    const items = Array.isArray(res?.items) ? res.items : [];
-    libCache[kind] = items;
-    renderLibItemsList(kind, items);
-  } catch (err) {
-    // 后端接口若未就绪或报错，做优雅降级容错
-    const cached = libCache[kind] || [];
-    if (cached.length) {
-      renderLibItemsList(kind, cached);
-      toast(`片段库（离线缓存模式）：${err.message}`);
-    } else {
-      listWrap.innerHTML = `<div class="lib-empty" style="color:var(--err);font-weight:600;font-size:13px;padding:24px;">⚠️ 片段库加载异常：${esc(err.message)}</div>`;
-    }
-  }
-}
-
-const CHAR_IP_TAB_KEY = 'nai-char-ip-tab';
-let currentCharIpTab = null;
-
-function readCharIpTab() {
-  if (currentCharIpTab) return currentCharIpTab;
-  try {
-    currentCharIpTab = localStorage.getItem(CHAR_IP_TAB_KEY) || null;
-  } catch {
-    currentCharIpTab = null;
-  }
-  return currentCharIpTab;
-}
-
-function writeCharIpTab(name) {
-  currentCharIpTab = name || null;
-  try {
-    if (name) localStorage.setItem(CHAR_IP_TAB_KEY, name);
-    else localStorage.removeItem(CHAR_IP_TAB_KEY);
-  } catch {
-    /* ignore quota / private mode */
-  }
-}
-
-const ACTION_GROUP_TAB_KEY = 'nai-action-group-tab';
-let currentActionGroupTab = null;
-
-function readActionGroupTab() {
-  if (currentActionGroupTab) return currentActionGroupTab;
-  try {
-    currentActionGroupTab = localStorage.getItem(ACTION_GROUP_TAB_KEY) || null;
-  } catch {
-    currentActionGroupTab = null;
-  }
-  return currentActionGroupTab;
-}
-
-function writeActionGroupTab(name) {
-  currentActionGroupTab = name || null;
-  try {
-    if (name) localStorage.setItem(ACTION_GROUP_TAB_KEY, name);
-    else localStorage.removeItem(ACTION_GROUP_TAB_KEY);
-  } catch {
-    /* ignore quota / private mode */
-  }
-}
-
-let activeLibPopover = null;
-
-function computePopoverPosition(triggerRect, menuWidth = 140, menuHeight = 44, margin = 6, padding = 8) {
-  const viewportW = window.innerWidth;
-  const viewportH = window.innerHeight;
-
-  const spaceBelow = viewportH - triggerRect.bottom;
-  const spaceAbove = triggerRect.top;
-  const flip = spaceBelow < menuHeight + margin && spaceAbove >= menuHeight + margin;
-
-  let top = flip ? triggerRect.top - menuHeight - margin : triggerRect.bottom + margin;
-  // 垂直贴边防护
-  top = Math.max(padding, Math.min(top, viewportH - menuHeight - padding));
-
-  // 默认右对齐触发按钮
-  let left = triggerRect.right - menuWidth;
-  // 水平贴边防护
-  left = Math.max(padding, Math.min(left, viewportW - menuWidth - padding));
-
-  return { top, left, flip };
-}
-
-function closeActiveLibPopover() {
-  if (activeLibPopover) {
-    if (activeLibPopover.menu && activeLibPopover.menu.parentNode) {
-      activeLibPopover.menu.parentNode.removeChild(activeLibPopover.menu);
-    }
-    if (activeLibPopover.trigger) {
-      activeLibPopover.trigger.classList.remove('active');
-    }
-    activeLibPopover = null;
-  }
+    if (name) localStorage.setItem(LIB_GROUP_STORE_KEYS[kind], name);
+    else localStorage.removeItem(LIB_GROUP_STORE_KEYS[kind]);
+  } catch { /* 隐私模式 / 配额满时忽略 */ }
 }
 
 async function copyPromptText(text) {
@@ -2361,7 +2213,7 @@ async function copyPromptText(text) {
 }
 
 function formatCharPromptXxxIp(prompt) {
-  let p = String(prompt || '').replace(/[\u200e\u200f\u200b\ufeff]/g, '').trim();
+  let p = String(prompt || '').replace(/[‎‏​﻿]/g, '').trim();
   if (!p || p.includes('\n') || (p.split(',').length - 1) >= 2) return p;
   let m = p.match(/^(.+?)_\(([^)]+)\)$/);
   if (m) return `${m[1].replace(/_/g, ' ').trim()} (${m[2].replace(/_/g, ' ').trim()})`;
@@ -2378,129 +2230,14 @@ function formatCharPromptXxxIp(prompt) {
   return p;
 }
 
-
-function characterIpName(item) {
-  const rawTitle = String(item?.title || '').trim();
-  if (rawTitle) {
-    const idx = rawTitle.indexOf(' | ');
-    if (idx !== -1) {
-      const prefix = rawTitle.slice(0, idx).trim();
-      if (prefix) return prefix;
-    }
-  }
-  return '其他';
-}
-
-function characterDisplayTitle(item) {
-  const raw = String(item?.title || '').trim();
-  const ip = characterIpName(item);
-  if (ip !== '其他' && raw.startsWith(`${ip} | `)) {
-    return raw.slice(ip.length + 3).trim() || raw;
-  }
-  return raw || '未命名片段';
-}
-
-function groupCharacterItems(items) {
-  const groups = new Map();
-  items.forEach((item) => {
-    const groupName = characterIpName(item);
-    if (!groups.has(groupName)) groups.set(groupName, []);
-    groups.get(groupName).push(item);
-  });
-
-  for (const list of groups.values()) {
-    list.sort((a, b) => (Number(a.sort) - Number(b.sort)) || (Number(a.id) - Number(b.id)));
-  }
-
-  const sortedNames = Array.from(groups.keys()).sort((a, b) => {
-    if (a === '其他') return 1;
-    if (b === '其他') return -1;
-    const minA = Math.min(...groups.get(a).map((it) => Number(it.sort) || 0));
-    const minB = Math.min(...groups.get(b).map((it) => Number(it.sort) || 0));
-    if (minA !== minB) return minA - minB;
-    return a.localeCompare(b, 'zh-CN');
-  });
-
-  return sortedNames.map((name) => ({
-    name,
-    items: groups.get(name),
-  }));
-}
-
-const ACTION_GROUP_ORDER = ['常用', '站立', '传教士', '侧躺', '骑乘', '后入', '特殊', '对照', '自拍', '展示', '多人', '口交', '事后', '其他'];
-
-function actionGroupName(item) {
-  const rawTitle = String(item?.title || '').trim();
-  if (rawTitle) {
-    const idx = rawTitle.indexOf(' | ');
-    if (idx !== -1) {
-      const prefix = rawTitle.slice(0, idx).trim();
-      if (prefix) return prefix;
-    }
-    if (/口交|跪舔/.test(rawTitle)) return '口交';
-    if (/传教士|操逼/.test(rawTitle)) return '传教士';
-    if (/背骑|骑乘/.test(rawTitle)) return '骑乘';
-    if (/侧位/.test(rawTitle)) return '侧躺';
-    if (/站立/.test(rawTitle)) return '站立';
-    if (/后入|俯卧|四足|弯腰/.test(rawTitle)) return '后入';
-    if (/中出|事后/.test(rawTitle)) return '事后';
-  }
-  return '其他';
-}
-
-function actionDisplayTitle(item) {
-  const raw = String(item?.title || '').trim();
-  const group = actionGroupName(item);
-  if (group !== '其他' && raw.startsWith(`${group} | `)) {
-    return raw.slice(group.length + 3).trim() || raw;
-  }
-  return raw || '未命名片段';
-}
-
-function groupActionItems(items) {
-  const groups = new Map();
-  items.forEach((item) => {
-    const groupName = actionGroupName(item);
-    if (!groups.has(groupName)) groups.set(groupName, []);
-    groups.get(groupName).push(item);
-  });
-
-  for (const list of groups.values()) {
-    list.sort((a, b) => (Number(a.sort) - Number(b.sort)) || (Number(a.id) - Number(b.id)));
-  }
-
-  const sortedNames = Array.from(groups.keys()).sort((a, b) => {
-    if (a === '其他') return 1;
-    if (b === '其他') return -1;
-    const ia = ACTION_GROUP_ORDER.indexOf(a);
-    const ib = ACTION_GROUP_ORDER.indexOf(b);
-    const oa = ia === -1 ? ACTION_GROUP_ORDER.length : ia;
-    const ob = ib === -1 ? ACTION_GROUP_ORDER.length : ib;
-    if (oa !== ob) return oa - ob;
-    const minA = Math.min(...groups.get(a).map((it) => Number(it.sort) || 0));
-    const minB = Math.min(...groups.get(b).map((it) => Number(it.sort) || 0));
-    if (minA !== minB) return minA - minB;
-    return a.localeCompare(b, 'zh-CN');
-  });
-
-  return sortedNames.map((name) => ({
-    name,
-    items: groups.get(name),
-  }));
-}
-
-let activeLibEditor = null;
-
 function parseLibCharContent(item) {
   try {
     const obj = typeof item.content === 'string' ? JSON.parse(item.content) : item.content;
     if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-      return {
-        prompt: String(obj.prompt || ''),
-        uc: String(obj.uc || ''),
-        x: obj.x === undefined ? null : obj.x,
-        y: obj.y === undefined ? null : obj.y,
-      };
+      const num = (v) => (typeof v === 'number' && !Number.isNaN(v) ? Math.max(0, Math.min(1, v)) : null);
+      const x = num(obj.x);
+      const y = num(obj.y);
+      return { prompt: String(obj.prompt || ''), uc: String(obj.uc || ''), x: x === null || y === null ? null : x, y: x === null || y === null ? null : y };
     }
   } catch {
     /* 非 JSON 角色内容时降级为纯文本 */
@@ -2508,370 +2245,465 @@ function parseLibCharContent(item) {
   return { prompt: String(item.content || ''), uc: '', x: null, y: null };
 }
 
-function closeLibItemEditor() {
-  if (!activeLibEditor) return;
-  const { card, item, kind } = activeLibEditor;
-  activeLibEditor = null;
-  if (card && card.parentNode) {
-    card.replaceWith(createLibItemCard(item, kind));
+/** 标题「分组 | 名称」中的分组；动作串没有前缀时按关键词归类 */
+function libGroupName(item, kind) {
+  const title = String(item?.title || '').trim();
+  const idx = title.indexOf(' | ');
+  if (idx > 0) return title.slice(0, idx).trim();
+  if (kind === 'action') {
+    if (/口交|跪舔/.test(title)) return '口交';
+    if (/传教士|操逼/.test(title)) return '传教士';
+    if (/背骑|骑乘/.test(title)) return '骑乘';
+    if (/侧位/.test(title)) return '侧躺';
+    if (/站立/.test(title)) return '站立';
+    if (/后入|俯卧|四足|弯腰/.test(title)) return '后入';
+    if (/中出|事后/.test(title)) return '事后';
   }
+  return LIB_GROUP_OTHER;
 }
 
-function enterLibItemEditMode(card, item, kind) {
-  closeActiveLibPopover();
-  if (activeLibEditor) closeLibItemEditor();
+/** 分组类条目显示名：去掉「分组 | 」前缀 */
+function libDisplayTitle(item, kind) {
+  const title = String(item?.title || '').trim();
+  if (LIB_KINDS[kind]?.group) {
+    const group = libGroupName(item, kind);
+    if (title.startsWith(`${group} | `)) return title.slice(group.length + 3).trim() || title;
+  }
+  return title || '未命名片段';
+}
 
+function libSortItems(list) {
+  return list.sort((a, b) => (Number(a.sort) - Number(b.sort)) || (Number(a.id) - Number(b.id)));
+}
+
+/** 按分组聚合（已排序）：动作串按常用分类顺序，角色按作品内最小排序值 */
+function groupLibItems(items, kind) {
+  const groups = new Map();
+  for (const item of items) {
+    const name = libGroupName(item, kind);
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(item);
+  }
+  const minSort = (name) => Math.min(...groups.get(name).map((it) => Number(it.sort) || 0));
+  const orderOf = (name) => {
+    const i = ACTION_GROUP_ORDER.indexOf(name);
+    return i === -1 ? ACTION_GROUP_ORDER.length : i;
+  };
+  const names = [...groups.keys()].sort((a, b) => {
+    if (a === LIB_GROUP_OTHER) return 1;
+    if (b === LIB_GROUP_OTHER) return -1;
+    if (kind === 'action' && orderOf(a) !== orderOf(b)) return orderOf(a) - orderOf(b);
+    return (minSort(a) - minSort(b)) || a.localeCompare(b, 'zh-CN');
+  });
+  return names.map((name) => ({ name, items: libSortItems(groups.get(name)) }));
+}
+
+function libSearchText(item) {
+  if (item.kind !== 'character') return String(item.content || '');
+  const c = parseLibCharContent(item);
+  return `${c.prompt}\n${c.uc}`;
+}
+
+function libTerms() {
+  return lib.query.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function libMatches(item, terms) {
+  if (!terms.length) return true;
+  const hay = `${item.title}\n${libSearchText(item)}`.toLowerCase();
+  return terms.every((t) => hay.includes(t));
+}
+
+/** 转义并高亮搜索词 */
+function libHighlight(text, terms) {
+  const s = String(text || '');
+  if (!terms.length) return esc(s);
+  const re = new RegExp(`(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
+  return s.split(re).map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join('');
+}
+
+function countTags(text) {
+  return String(text || '').split(/[,，\n]/).filter((s) => s.trim()).length;
+}
+
+function libPositionLabel(c) {
+  if (c.x === null) return '自动站位';
+  const preset = Object.values(LIB_POS_PRESETS).find((p) => Math.abs(p.x - c.x) < 0.01 && Math.abs(p.y - c.y) < 0.01);
+  return preset ? `站位 · ${preset.label}` : `坐标 ${+c.x.toFixed(2)}, ${+c.y.toFixed(2)}`;
+}
+
+const icon = (name) => `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+
+function libCardHtml(item, terms) {
+  const kind = item.kind;
+  const armed = lib.armedDelete === item.id;
+  const editing = lib.editing?.id === item.id;
+  let text;
+  let meta;
+  if (kind === 'character') {
+    const c = parseLibCharContent(item);
+    text = c.prompt;
+    meta = `<span class="pl-chip">${esc(libPositionLabel(c))}</span>${c.uc ? '<span class="pl-chip">含 UC</span>' : ''}`;
+  } else {
+    text = item.content;
+    meta = `<span class="pl-meta">${countTags(item.content)} 个标签</span>`;
+  }
+  return `<article class="pl-card${editing ? ' is-editing' : ''}" data-id="${item.id}" tabindex="0" role="button" aria-label="插入 ${esc(item.title)}">
+      <div class="pl-card-title">${libHighlight(libDisplayTitle(item, kind), terms)}</div>
+      <div class="pl-card-text">${libHighlight(text, terms) || '<span class="pl-muted">（空）</span>'}</div>
+      <div class="pl-card-foot">
+        <div class="pl-card-meta">${meta}</div>
+        <div class="pl-card-actions">
+          <button type="button" class="pl-act" data-act="copy" title="复制内容" aria-label="复制">${icon('copy')}</button>
+          <button type="button" class="pl-act" data-act="edit" title="编辑" aria-label="编辑">${icon('edit')}</button>
+          <button type="button" class="pl-act" data-act="pin" title="置顶" aria-label="置顶">${icon('pin')}</button>
+          <button type="button" class="pl-act danger${armed ? ' armed' : ''}" data-act="del" title="${armed ? '再点一次确认删除' : '删除'}" aria-label="删除">${icon('trash')}${armed ? '<span>确认删除</span>' : ''}</button>
+        </div>
+      </div>
+    </article>`;
+}
+
+function libEmptyHtml(kind, terms) {
+  if (terms.length) {
+    return `<div class="pl-empty">${icon('search')}<b>没有匹配「${esc(lib.query)}」的${esc(LIB_KINDS[kind].name)}</b><span>换个关键词，或切换到其他分类看看（分类上的数字为匹配条数）</span></div>`;
+  }
+  return `<div class="pl-empty">${icon('book')}<b>还没有${esc(LIB_KINDS[kind].name)}片段</b><span>把常用的提示词存起来，之后一键插入</span><button type="button" class="btn primary small" data-act="new">${icon('plus')}<span>新建${esc(LIB_KINDS[kind].name)}</span></button></div>`;
+}
+
+function renderLibrary() {
+  const kind = lib.kind;
+  const cfg = LIB_KINDS[kind];
+  const terms = libTerms();
+
+  // 分类标签：数字 = 该分类条数（搜索时为匹配条数）
+  document.querySelectorAll('#promptLibTabNav .pl-kind').forEach((tab) => {
+    const k = tab.dataset.kind;
+    const n = lib.items.filter((it) => it.kind === k && libMatches(it, terms)).length;
+    tab.classList.toggle('active', k === kind);
+    tab.setAttribute('aria-selected', k === kind ? 'true' : 'false');
+    tab.classList.toggle('dim', terms.length > 0 && n === 0);
+    tab.querySelector('em').textContent = lib.loaded ? n : '…';
+  });
+  $('plTotal').textContent = lib.items.length;
+  $('plLimit').textContent = lib.limit;
+  $('plApplyHint').textContent = lib.target ? '点击卡片插入到分镜工作室' : cfg.hint;
+  $('plNewBtn').querySelector('span').textContent = `新建${cfg.name}`;
+
+  const listWrap = $('libItemsList');
+  if (!lib.loaded) {
+    listWrap.innerHTML = '<div class="pl-empty pl-loading"><span class="pl-spinner"></span><span>正在加载片段…</span></div>';
+    $('plGroups').classList.add('hidden');
+    return;
+  }
+
+  const matched = lib.items.filter((it) => it.kind === kind && libMatches(it, terms));
+  const groupsWrap = $('plGroups');
+  if (!cfg.group) {
+    groupsWrap.classList.add('hidden');
+    listWrap.innerHTML = matched.length
+      ? `<div class="pl-grid">${libSortItems(matched).map((it) => libCardHtml(it, terms)).join('')}</div>`
+      : libEmptyHtml(kind, terms);
+    return;
+  }
+
+  const groups = groupLibItems(matched, kind);
+  let selected = readLibGroup(kind);
+  if (selected !== LIB_GROUP_ALL && !groups.some((g) => g.name === selected)) selected = LIB_GROUP_ALL;
+  groupsWrap.classList.toggle('hidden', groups.length < 2 && selected === LIB_GROUP_ALL);
+  groupsWrap.innerHTML = [{ name: LIB_GROUP_ALL, label: '全部', count: matched.length }, ...groups.map((g) => ({ name: g.name, label: g.name, count: g.items.length }))]
+    .map((g) => `<button type="button" class="pl-group${g.name === selected ? ' active' : ''}" data-group="${esc(g.name)}" role="tab" aria-selected="${g.name === selected}">${esc(g.label)}<em>${g.count}</em></button>`)
+    .join('');
+
+  if (!matched.length) {
+    listWrap.innerHTML = libEmptyHtml(kind, terms);
+    return;
+  }
+  const shown = selected === LIB_GROUP_ALL ? groups : groups.filter((g) => g.name === selected);
+  listWrap.innerHTML = shown.map((g) => `
+    ${selected === LIB_GROUP_ALL && groups.length > 1 ? `<div class="pl-section"><span>${esc(g.name)}</span><em>${g.items.length}</em></div>` : ''}
+    <div class="pl-grid">${g.items.map((it) => libCardHtml(it, terms)).join('')}</div>`).join('');
+}
+
+async function loadLibrary() {
+  try {
+    const res = await api('/api/prompts');
+    lib.items = Array.isArray(res?.items) ? res.items : [];
+    lib.limit = res?.limit || lib.limit;
+    lib.loaded = true;
+  } catch (err) {
+    if (!lib.loaded) {
+      $('libItemsList').innerHTML = `<div class="pl-empty is-error">${icon('alert')}<b>片段库加载失败</b><span>${esc(err.message)}</span><button type="button" class="btn ghost-btn small" data-act="retry">${icon('refresh')}<span>重试</span></button></div>`;
+      return;
+    }
+    toast(`片段库刷新失败，显示的是缓存：${err.message}`, true);
+  }
+  renderLibrary();
+}
+
+function openPromptLibrary(kind = 'painter', targetCtx = null) {
+  const modal = $('promptLibModal');
+  if (!modal) return;
+  lib.target = targetCtx;
+  lib.kind = LIB_KINDS[kind] ? kind : 'painter';
+  lib.query = '';
+  $('plSearch').value = '';
+  closeLibEditor();
+  modal.classList.remove('hidden');
+  renderLibrary(); // 有缓存时先秒开，再后台刷新
+  loadLibrary();
+  if (matchMedia('(hover: hover)').matches) setTimeout(() => $('plSearch').focus(), 30);
+}
+
+function closePromptLibrary() {
+  lib.target = null;
+  disarmLibDelete();
+  closeLibEditor();
+  $('promptLibModal')?.classList.add('hidden');
+}
+
+function switchPromptLibKind(kind) {
+  if (!LIB_KINDS[kind] || kind === lib.kind) return;
+  lib.kind = kind;
+  closeLibEditor();
+  disarmLibDelete();
+  $('plBody').scrollTop = 0;
+  renderLibrary();
+}
+
+function disarmLibDelete() {
+  clearTimeout(lib.armedTimer);
+  lib.armedDelete = null;
+}
+
+/* ── 新建 / 编辑表单 ── */
+function libPositionMode(c) {
+  if (c.x === null) return 'auto';
+  const hit = Object.entries(LIB_POS_PRESETS).find(([, p]) => Math.abs(p.x - c.x) < 0.01 && Math.abs(p.y - c.y) < 0.01);
+  return hit ? hit[0] : 'custom';
+}
+
+function libEditorHtml(item, kind) {
+  const cfg = LIB_KINDS[kind];
   const isChar = kind === 'character';
-  const charObj = isChar ? parseLibCharContent(item) : null;
-  let posMode = (charObj && charObj.x !== null && charObj.x !== undefined) ? 'manual' : 'auto';
+  let group = '';
+  let name = item?.title || '';
+  if (cfg.group) {
+    if (item) {
+      const g = libGroupName(item, kind);
+      if (item.title.startsWith(`${g} | `)) { group = g; name = item.title.slice(g.length + 3); }
+    } else {
+      const sel = readLibGroup(kind);
+      if (sel !== LIB_GROUP_ALL && sel !== LIB_GROUP_OTHER) group = sel;
+    }
+  }
+  const knownGroups = cfg.group
+    ? [...new Set(lib.items.filter((it) => it.kind === kind).map((it) => libGroupName(it, kind)))].filter((g) => g !== LIB_GROUP_OTHER)
+    : [];
+  const c = isChar ? parseLibCharContent(item || { content: '' }) : null;
+  const mode = isChar ? libPositionMode(c) : null;
+  const content = isChar ? '' : String(item?.content || '');
+  const namePlaceholder = { painter: '例如：水墨水彩混搭', action: '例如：回眸', uc: '例如：通用质量 UC', character: '例如：雷电将军', main: '例如：银发少女夜景' }[kind];
 
-  const editorCard = document.createElement('div');
-  editorCard.className = 'lib-item-card lib-item-editing';
-  editorCard.innerHTML = `
-    <form class="lib-edit-form">
-      <div class="lib-edit-field">
-        <label class="field-title">标题</label>
-        <input class="styled-admin-input lib-edit-title" maxlength="200" value="${esc(item.title || '')}" placeholder="${isChar ? '作品 | 角色名' : kind === 'action' ? '分类 | 名称' : '片段标题'}">
+  return `<form class="pl-editor" novalidate>
+      <div class="pl-editor-head">
+        <b>${item ? `编辑${esc(cfg.name)}` : `新建${esc(cfg.name)}`}</b>
+        <span class="pl-muted">Ctrl + Enter 保存 · Esc 取消</span>
+      </div>
+      <div class="pl-editor-grid${cfg.group ? ' has-group' : ''}">
+        ${cfg.group ? `<label class="pl-field"><span>${cfg.group}<small>选填，用于分组</small></span>
+          <input class="styled-admin-input" name="group" maxlength="60" list="plGroupList" value="${esc(group)}" placeholder="${kind === 'character' ? '例如：原神' : '例如：常用'}">
+          <datalist id="plGroupList">${knownGroups.map((g) => `<option value="${esc(g)}">`).join('')}</datalist></label>` : ''}
+        <label class="pl-field"><span>${kind === 'character' ? '角色名' : '标题'}</span>
+          <input class="styled-admin-input" name="name" maxlength="200" value="${esc(name)}" placeholder="${esc(namePlaceholder)}" required></label>
       </div>
       ${isChar ? `
-      <div class="lib-edit-field">
-        <label class="field-title">角色提示词</label>
-        <textarea class="styled-admin-input lib-textarea lib-edit-prompt" rows="3">${esc(charObj.prompt)}</textarea>
-      </div>
-      <div class="lib-edit-field">
-        <label class="field-title">角色排除词</label>
-        <input class="styled-admin-input lib-edit-uc" value="${esc(charObj.uc)}" placeholder="选填">
-      </div>
-      <div class="lib-edit-pos-row">
-        <button type="button" class="char-mode-btn lib-edit-pos-auto${posMode === 'auto' ? ' active' : ''}">自动位置</button>
-        <button type="button" class="char-mode-btn lib-edit-pos-manual${posMode === 'manual' ? ' active' : ''}">指定坐标</button>
-        <div class="lib-coord-inputs lib-edit-coords${posMode === 'manual' ? '' : ' hidden'}">
-          <label class="lib-coord-item">X <input type="number" class="styled-admin-input tiny-num lib-edit-x" min="0" max="1" step="0.05" value="${charObj.x ?? 0.5}"></label>
-          <label class="lib-coord-item">Y <input type="number" class="styled-admin-input tiny-num lib-edit-y" min="0" max="1" step="0.05" value="${charObj.y ?? 0.5}"></label>
+      <label class="pl-field"><span>角色提示词</span>
+        <textarea class="styled-admin-input" name="prompt" rows="2" placeholder="raiden shogun (genshin impact)">${esc(c.prompt)}</textarea></label>
+      <label class="pl-field"><span>角色 UC<small>选填</small></span>
+        <input class="styled-admin-input" name="uc" value="${esc(c.uc)}" placeholder="该角色专属排除词"></label>
+      <div class="pl-field"><span>站位</span>
+        <div class="pl-pos">
+          <div class="pl-seg" role="radiogroup">
+            ${[['auto', '自动'], ['left', '左'], ['center', '中'], ['right', '右'], ['custom', '自定义']].map(([v, l]) => `<button type="button" class="pl-seg-btn${mode === v ? ' active' : ''}" data-pos="${v}" role="radio" aria-checked="${mode === v}">${l}</button>`).join('')}
+          </div>
+          <div class="pl-coords${mode === 'custom' ? '' : ' hidden'}">
+            <label>X <input type="number" class="styled-admin-input" name="x" min="0" max="1" step="0.05" value="${c.x ?? 0.5}"></label>
+            <label>Y <input type="number" class="styled-admin-input" name="y" min="0" max="1" step="0.05" value="${c.y ?? 0.5}"></label>
+          </div>
         </div>
+      </div>` : `
+      <label class="pl-field"><span>${kind === 'uc' ? '排除词内容' : '提示词内容'}<small class="pl-counter">${countTags(content)} 个标签 · ${content.length}/5000</small></span>
+        <textarea class="styled-admin-input pl-content" name="content" rows="4" maxlength="5000" placeholder="${kind === 'uc' ? 'lowres, bad anatomy, bad hands…' : '用英文逗号分隔的 tags…'}">${esc(content)}</textarea></label>`}
+      <div class="pl-editor-actions">
+        <button type="button" class="btn ghost-btn small" data-act="cancel">取消</button>
+        <button type="submit" class="btn primary small">${icon('check')}<span>${item ? '保存修改' : '保存到片段库'}</span></button>
       </div>
-      ` : `
-      <div class="lib-edit-field">
-        <label class="field-title">提示词内容</label>
-        <textarea class="styled-admin-input lib-textarea lib-edit-content" rows="6">${esc(item.content || '')}</textarea>
-      </div>
-      `}
-      <div class="lib-edit-actions">
-        <button type="submit" class="btn primary tiny lib-edit-save">💾 保存</button>
-        <button type="button" class="btn ghost-btn tiny lib-edit-cancel">取消</button>
-      </div>
-    </form>
-  `;
-
-  card.replaceWith(editorCard);
-  activeLibEditor = { card: editorCard, item, kind };
-
-  const form = editorCard.querySelector('.lib-edit-form');
-  form.addEventListener('click', (e) => e.stopPropagation());
-
-  const autoBtn = editorCard.querySelector('.lib-edit-pos-auto');
-  const manualBtn = editorCard.querySelector('.lib-edit-pos-manual');
-  const coords = editorCard.querySelector('.lib-edit-coords');
-  autoBtn?.addEventListener('click', () => {
-    posMode = 'auto';
-    autoBtn.classList.add('active');
-    manualBtn?.classList.remove('active');
-    coords?.classList.add('hidden');
-  });
-  manualBtn?.addEventListener('click', () => {
-    posMode = 'manual';
-    manualBtn.classList.add('active');
-    autoBtn?.classList.remove('active');
-    coords?.classList.remove('hidden');
-  });
-
-  editorCard.querySelector('.lib-edit-cancel').addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeLibItemEditor();
-  });
-
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const title = editorCard.querySelector('.lib-edit-title').value.trim();
-    if (!title) return toast('请输入标题', true);
-    if (title.length > 200) return toast('标题长度不能超过 200 字符', true);
-
-    let content = '';
-    if (isChar) {
-      const prompt = formatCharPromptXxxIp(editorCard.querySelector('.lib-edit-prompt').value.trim());
-      const uc = editorCard.querySelector('.lib-edit-uc').value.trim();
-      let x = null;
-      let y = null;
-      if (posMode === 'manual') {
-        const parsedX = parseFloat(editorCard.querySelector('.lib-edit-x').value);
-        const parsedY = parseFloat(editorCard.querySelector('.lib-edit-y').value);
-        x = !isNaN(parsedX) ? Math.max(0, Math.min(1, +parsedX.toFixed(3))) : 0.5;
-        y = !isNaN(parsedY) ? Math.max(0, Math.min(1, +parsedY.toFixed(3))) : 0.5;
-      }
-      content = JSON.stringify({ prompt, uc, x, y });
-    } else {
-      content = editorCard.querySelector('.lib-edit-content').value;
-      if (!String(content).trim()) return toast('请输入提示词内容', true);
-    }
-    if (content.length > 5000) return toast('内容长度不能超过 5000 字符', true);
-
-    const saveBtn = editorCard.querySelector('.lib-edit-save');
-    saveBtn.disabled = true;
-    try {
-      await api(`/api/prompts/${item.id}`, { method: 'POST', body: JSON.stringify({ title, content }) });
-      const updated = { ...item, title, content };
-      if (libCache[kind]) {
-        libCache[kind] = libCache[kind].map((it) => (it.id === item.id ? { ...it, title, content } : it));
-      }
-      if (kind === 'character') writeCharIpTab(characterIpName(updated));
-      else if (kind === 'action') writeActionGroupTab(actionGroupName(updated));
-      activeLibEditor = null;
-      toast('片段已保存');
-      fetchAndRenderLibItems(kind);
-    } catch (err) {
-      toast(`保存失败：${err.message}`, true);
-      saveBtn.disabled = false;
-    }
-  });
+    </form>`;
 }
 
-
-function createLibItemCard(item, kind) {
-  const card = document.createElement('div');
-  card.className = 'lib-item-card';
-
-  let previewText = '';
-  let badgeText = LIB_KIND_TITLES[kind] || kind;
-  if (kind === 'character') {
-    try {
-      const charObj = typeof item.content === 'string' ? JSON.parse(item.content) : item.content;
-      const posText = (charObj.x === null || charObj.y === null || charObj.x === undefined)
-        ? '自动站位'
-        : `(${Math.round(charObj.x * 100)}%, ${Math.round(charObj.y * 100)}%)`;
-      badgeText = `角色 · ${posText}`;
-    } catch {
-      // content 解析失败时仅保留默认 badge
-    }
-  } else {
-    previewText = String(item.content || '');
+function openLibEditor(item = null) {
+  if (lib.editing && !item && lib.editing.id === null) {
+    $('plEditorSlot').querySelector('input[name=name]')?.focus();
+    return;
   }
-
-  if (kind === 'character') {
-    // 角色分区卡片：平铺导入 / 复制 / 编辑 / 删除
-    card.classList.add('lib-item-card-char');
-    card.innerHTML = `
-      <div class="lib-item-info">
-        <div class="lib-item-title-row">
-          <span class="lib-item-title">${esc(characterDisplayTitle(item))}</span>
-          <span class="lib-item-badge">${esc(badgeText)}</span>
-        </div>
-      </div>
-      <div class="lib-item-actions">
-        <button type="button" class="btn primary tiny lib-act-btn lib-char-apply-btn" title="导入到角色面板">📥 导入</button>
-        <button type="button" class="btn ghost-btn tiny lib-act-btn lib-char-copy-btn" title="复制角色提示词">📋 复制</button>
-        <button type="button" class="btn ghost-btn tiny lib-act-btn lib-edit-open-btn" title="修改并保存">✏️ 编辑</button>
-        <button type="button" class="btn ghost-btn tiny lib-act-btn lib-del-btn" title="删除此片段">✕</button>
-      </div>
-    `;
-
-    // 【导入】按钮
-    card.querySelector('.lib-char-apply-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      applyLibItem(item, kind);
-    });
-
-    // 【复制】按钮
-    card.querySelector('.lib-char-copy-btn').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      let textToCopy = '';
-      try {
-        const charObj = typeof item.content === 'string' ? JSON.parse(item.content) : item.content;
-        textToCopy = String(charObj?.prompt || '');
-      } catch {
-        textToCopy = String(item.content || '');
-      }
-      await copyPromptText(textToCopy);
-    });
-  } else {
-    // 非角色分区卡片：保留“操作 ▾”与二级浮层
-    card.innerHTML = `
-      <div class="lib-item-info">
-        <div class="lib-item-title-row">
-          <span class="lib-item-title">${esc(kind === 'action' ? actionDisplayTitle(item) : (item.title || '未命名片段'))}</span>
-          <span class="lib-item-badge">${esc(badgeText)}</span>
-        </div>
-        <div class="lib-item-preview" title="${esc(previewText)}">${esc(previewText)}</div>
-      </div>
-      <div class="lib-item-actions">
-        <button type="button" class="btn ghost-btn tiny lib-act-btn lib-popover-trigger" title="选择操作">操作 ▾</button>
-        <button type="button" class="btn ghost-btn tiny lib-act-btn lib-edit-open-btn" title="修改并保存">✏️ 编辑</button>
-        <button type="button" class="btn ghost-btn tiny lib-act-btn lib-del-btn" title="删除此片段">✕</button>
-      </div>
-    `;
-
-    const triggerBtn = card.querySelector('.lib-popover-trigger');
-
-    const togglePopover = (e) => {
-      e.stopPropagation();
-      // 如果当前正在展示此浮层，则关闭
-      if (activeLibPopover && activeLibPopover.trigger === triggerBtn) {
-        closeActiveLibPopover();
-        return;
-      }
-      closeActiveLibPopover();
-
-      const menu = document.createElement('div');
-      menu.className = 'lib-popover-menu';
-      menu.innerHTML = `
-        <button type="button" class="btn lib-pop-btn lib-pop-apply">📥 导入</button>
-        <button type="button" class="btn lib-pop-btn lib-pop-copy">📋 复制</button>
-      `;
-
-      // 阻止菜单内点击冒泡到外部
-      menu.addEventListener('click', (evt) => evt.stopPropagation());
-
-      // 【导入】按钮
-      menu.querySelector('.lib-pop-apply').addEventListener('click', (evt) => {
-        evt.stopPropagation();
-        closeActiveLibPopover();
-        applyLibItem(item, kind);
-      });
-
-      // 【复制】按钮
-      menu.querySelector('.lib-pop-copy').addEventListener('click', async (evt) => {
-        evt.stopPropagation();
-        closeActiveLibPopover();
-        const textToCopy = String(item.content || '');
-        await copyPromptText(textToCopy);
-      });
-
-      // 挂载到 document.body 配合 position:fixed 避免任何容器裁剪
-      document.body.appendChild(menu);
-      triggerBtn.classList.add('active');
-
-      const triggerRect = triggerBtn.getBoundingClientRect();
-      const menuRect = menu.getBoundingClientRect();
-      const pos = computePopoverPosition(triggerRect, menuRect.width || 140, menuRect.height || 42);
-      menu.style.top = `${pos.top}px`;
-      menu.style.left = `${pos.left}px`;
-      if (pos.flip) {
-        menu.classList.add('flipped');
-      }
-
-      activeLibPopover = { menu, trigger: triggerBtn };
-    };
-
-    // 点击卡片主体或操作按钮均触发选择浮层
-    card.addEventListener('click', togglePopover);
-    triggerBtn.addEventListener('click', togglePopover);
-  }
-  card.querySelector('.lib-edit-open-btn')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeActiveLibPopover();
-    enterLibItemEditMode(card, item, kind);
+  disarmLibDelete();
+  lib.editing = { id: item ? item.id : null };
+  const slot = $('plEditorSlot');
+  slot.innerHTML = libEditorHtml(item, lib.kind);
+  $('plBody').scrollTop = 0;
+  renderLibrary();
+  const form = slot.querySelector('form');
+  form.addEventListener('submit', (e) => { e.preventDefault(); saveLibEditor(form, item); });
+  form.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); }
   });
-  // 删除按钮
-  card.querySelector('.lib-del-btn').addEventListener('click', async (e) => {
-    e.stopPropagation();
-    closeActiveLibPopover();
-    if (!confirm(`确定删除片段【${item.title || '未命名'}】吗？`)) return;
+  form.addEventListener('input', (e) => {
+    if (e.target.name !== 'content') return;
+    const v = e.target.value;
+    form.querySelector('.pl-counter').textContent = `${countTags(v)} 个标签 · ${v.length}/5000`;
+  });
+  form.addEventListener('click', (e) => {
+    const seg = e.target.closest('.pl-seg-btn');
+    if (seg) {
+      form.querySelectorAll('.pl-seg-btn').forEach((b) => {
+        b.classList.toggle('active', b === seg);
+        b.setAttribute('aria-checked', b === seg ? 'true' : 'false');
+      });
+      form.querySelector('.pl-coords').classList.toggle('hidden', seg.dataset.pos !== 'custom');
+    } else if (e.target.closest('[data-act=cancel]')) {
+      closeLibEditor();
+      renderLibrary();
+    }
+  });
+  const first = form.querySelector(LIB_KINDS[lib.kind].group && !item ? 'input[name=group]' : 'input[name=name]');
+  first?.focus();
+}
+
+function closeLibEditor() {
+  lib.editing = null;
+  const slot = $('plEditorSlot');
+  if (slot) slot.innerHTML = '';
+}
+
+async function saveLibEditor(form, item) {
+  const kind = item ? item.kind : lib.kind;
+  const f = form.elements;
+  const group = f.group ? f.group.value.trim().replace(/\s*\|\s*/g, ' ') : '';
+  const name = f.name.value.trim();
+  if (!name) { f.name.focus(); return toast('请填写标题', true); }
+  const title = group ? `${group} | ${name}` : name;
+  if (title.length > 200) return toast('标题长度不能超过 200 字符', true);
+
+  let content;
+  if (kind === 'character') {
+    const prompt = formatCharPromptXxxIp(f.prompt.value.trim());
+    if (!prompt) { f.prompt.focus(); return toast('请填写角色提示词', true); }
+    const mode = form.querySelector('.pl-seg-btn.active')?.dataset.pos || 'auto';
+    let x = null;
+    let y = null;
+    if (LIB_POS_PRESETS[mode]) ({ x, y } = LIB_POS_PRESETS[mode]);
+    if (mode === 'custom') {
+      const clamp = (v) => (Number.isNaN(v) ? 0.5 : Math.max(0, Math.min(1, +v.toFixed(3))));
+      x = clamp(parseFloat(f.x.value));
+      y = clamp(parseFloat(f.y.value));
+    }
+    content = JSON.stringify({ prompt, uc: f.uc.value.trim(), x, y });
+  } else {
+    content = f.content.value.trim();
+    if (!content) { f.content.focus(); return toast('请填写提示词内容', true); }
+  }
+  if (content.length > 5000) return toast('内容长度不能超过 5000 字符', true);
+
+  const submit = form.querySelector('[type=submit]');
+  submit.disabled = true;
+  try {
+    if (item) {
+      await api(`/api/prompts/${item.id}`, { method: 'POST', body: JSON.stringify({ title, content }) });
+      Object.assign(item, { title, content });
+    } else {
+      const sort = lib.items.filter((it) => it.kind === kind).reduce((m, it) => Math.max(m, Number(it.sort) || 0), 0);
+      const res = await api('/api/prompts', { method: 'POST', body: JSON.stringify({ kind, title, content, sort }) });
+      lib.items.push({ id: res.id, kind, title, content, sort });
+    }
+    if (LIB_KINDS[kind].group) writeLibGroup(kind, libGroupName({ title }, kind));
+    toast(item ? '已保存修改' : '已保存到片段库');
+    closeLibEditor();
+    renderLibrary();
+  } catch (err) {
+    toast(`保存失败：${err.message}`, true);
+    submit.disabled = false;
+  }
+}
+
+/* ── 卡片操作 ── */
+async function libCardAction(act, item) {
+  if (act === 'copy') {
+    return copyPromptText(item.kind === 'character' ? parseLibCharContent(item).prompt : String(item.content || ''));
+  }
+  if (act === 'edit') return openLibEditor(item);
+  if (act === 'pin') {
+    const sort = lib.items.filter((it) => it.kind === item.kind).reduce((m, it) => Math.min(m, Number(it.sort) || 0), 0) - 1;
+    try {
+      await api(`/api/prompts/${item.id}`, { method: 'POST', body: JSON.stringify({ sort }) });
+      item.sort = sort;
+      renderLibrary();
+      toast('已置顶');
+    } catch (err) { toast(`置顶失败：${err.message}`, true); }
+    return;
+  }
+  if (act === 'del') {
+    if (lib.armedDelete !== item.id) {
+      disarmLibDelete();
+      lib.armedDelete = item.id;
+      lib.armedTimer = setTimeout(() => { lib.armedDelete = null; renderLibrary(); }, 4000);
+      return renderLibrary();
+    }
+    disarmLibDelete();
     try {
       await api(`/api/prompts/${item.id}`, { method: 'DELETE' });
+      lib.items = lib.items.filter((it) => it.id !== item.id);
+      if (lib.editing?.id === item.id) closeLibEditor();
       toast('片段已删除');
-      if (libCache[kind]) {
-        libCache[kind] = libCache[kind].filter(it => it.id !== item.id);
-      }
-      fetchAndRenderLibItems(kind);
-    } catch (err) {
-      toast(`删除失败：${err.message}`, true);
-    }
-  });
-
-  return card;
+    } catch (err) { toast(`删除失败：${err.message}`, true); }
+    renderLibrary();
+  }
 }
 
-function renderGroupedLibrary(kind, items) {
-  const tabsWrap = $('libIpTabs');
-  const listWrap = $('libItemsList');
-  listWrap.innerHTML = '';
-  activeLibEditor = null;
-  closeActiveLibPopover();
-  if (tabsWrap) {
-    tabsWrap.classList.remove('hidden');
-    tabsWrap.innerHTML = '';
-  }
-
-  if (!items || !items.length) {
-    listWrap.innerHTML = '<div class="lib-empty">暂无已保存的片段，在上方表单添加一个吧！</div>';
-    return;
-  }
-
-  const groups = kind === 'action' ? groupActionItems(items) : groupCharacterItems(items);
-  const readTab = kind === 'action' ? readActionGroupTab : readCharIpTab;
-  const writeTab = kind === 'action' ? writeActionGroupTab : writeCharIpTab;
-  let selected = readTab();
-  if (!groups.some((g) => g.name === selected)) {
-    selected = groups[0].name;
-    writeTab(selected);
-  }
-
-  if (tabsWrap) {
-    groups.forEach((g) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = `lib-ip-tab${g.name === selected ? ' active' : ''}`;
-      btn.setAttribute('role', 'tab');
-      btn.setAttribute('aria-selected', g.name === selected ? 'true' : 'false');
-      btn.innerHTML = `<span class="lib-ip-tab-name">${esc(g.name)}</span><span class="lib-ip-tab-count">${g.items.length}</span>`;
-      btn.addEventListener('click', () => {
-        closeActiveLibPopover();
-        writeTab(g.name);
-        renderGroupedLibrary(kind, libCache[kind] || items);
-      });
-      tabsWrap.appendChild(btn);
-    });
-  }
-
-  const active = groups.find((g) => g.name === selected) || groups[0];
-  if ($('libListTitle')) {
-    $('libListTitle').textContent = kind === 'character'
-      ? `${active.name} · ${active.items.length} 名角色`
-      : `${active.name} · ${active.items.length} 个动作`;
-  }
-  active.items.forEach((item) => {
-    listWrap.appendChild(createLibItemCard(item, kind));
-  });
+/* ── 导入 / 导出 ── */
+function exportLibrary() {
+  if (!lib.items.length) return toast('片段库是空的，没有可导出的内容', true);
+  const data = {
+    app: 'nai-dreamforge',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    items: lib.items.map(({ kind, title, content, sort }) => ({ kind, title, content, sort })),
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `dreamforge-prompts-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`已导出 ${lib.items.length} 条片段`);
 }
 
-function renderCharacterIpLibrary(items) {
-  renderGroupedLibrary('character', items);
-}
-
-function renderLibItemsList(kind, items) {
-  const listWrap = $('libItemsList');
-  listWrap.innerHTML = '';
-  activeLibEditor = null;
-  closeActiveLibPopover();
-
-  if (kind !== 'character' && kind !== 'action') {
-    $('libIpTabs')?.classList.add('hidden');
+async function importLibraryFile(file) {
+  let items;
+  try {
+    const parsed = JSON.parse(await file.text());
+    items = (Array.isArray(parsed) ? parsed : parsed?.items || [])
+      .map(({ kind, title, content, sort }) => ({ kind, title, content, ...(Number.isInteger(sort) ? { sort } : {}) }));
+  } catch {
+    return toast('文件不是有效的 JSON', true);
   }
-
-  if (!items || !items.length) {
-    listWrap.innerHTML = '<div class="lib-empty">暂无已保存的片段，在上方表单添加一个吧！</div>';
-    return;
+  if (!items.length) return toast('文件里没有片段', true);
+  try {
+    const res = await api('/api/prompts/import', { method: 'POST', body: JSON.stringify({ items }) });
+    toast(`已导入 ${res.added} 条${res.skipped ? `，跳过 ${res.skipped} 条重复` : ''}`);
+    await loadLibrary();
+  } catch (err) {
+    toast(`导入失败：${err.message}`, true);
   }
-
-  if (kind === 'character' || kind === 'action') {
-    renderGroupedLibrary(kind, items);
-    return;
-  }
-
-  // 非分组分区平铺
-  items.forEach((item) => {
-    listWrap.appendChild(createLibItemCard(item, kind));
-  });
 }
 
 /* 在输入框光标位置插入文本，若无光标则追加 */
@@ -2894,37 +2726,30 @@ function insertAtCursor(textarea, textToInsert) {
     textarea.value = before + insertText + after;
     const newCursor = before.length + insertText.length;
     textarea.setSelectionRange(newCursor, newCursor);
+  } else if (!val.trim()) {
+    textarea.value = textToInsert.trim();
   } else {
-    if (!val.trim()) {
-      textarea.value = textToInsert.trim();
-    } else {
-      textarea.value = val.trimEnd().replace(/,+$/, '') + ', ' + textToInsert.trim();
-    }
+    textarea.value = val.trimEnd().replace(/,+$/, '') + ', ' + textToInsert.trim();
   }
   textarea.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-/* 处理自定义上下文的目标注入 */
+/* 处理分镜工作室等自定义上下文的目标注入 */
 function handleTargetContextInsert(item, kind, ctx) {
   let textToInsert = '';
   if (kind === 'character') {
-    try {
-      const raw = typeof item.content === 'string' ? JSON.parse(item.content) : item.content;
-      textToInsert = String(raw?.prompt || '').trim();
-      // 如果是工作室的多角色导入
-      if (ctx.type === 'comicAddChar') {
-        addComicCharacter({
-          name: item.title.split('|').pop().trim(),
-          prompt: textToInsert,
-          uc: String(raw?.uc || '').trim(),
-          x: typeof raw?.x === 'number' ? raw.x : 0.5,
-          y: typeof raw?.y === 'number' ? raw.y : 0.5,
-        });
-        toast(`已将角色【${item.title}】添加到工作室角色列表`);
-        return;
-      }
-    } catch {
-      textToInsert = String(item.content || '').trim();
+    const raw = parseLibCharContent(item);
+    textToInsert = raw.prompt.trim();
+    if (ctx.type === 'comicAddChar') {
+      addComicCharacter({
+        name: libDisplayTitle(item, kind),
+        prompt: textToInsert,
+        uc: raw.uc.trim(),
+        x: raw.x ?? 0.5,
+        y: raw.y ?? 0.5,
+      });
+      toast(`已将角色【${libDisplayTitle(item, kind)}】添加到工作室角色列表`);
+      return;
     }
   } else {
     textToInsert = String(item.content || '').trim();
@@ -2957,202 +2782,138 @@ function handleTargetContextInsert(item, kind, ctx) {
   }
 }
 
-/* 执行具体分区的片段插入应用 */
-function applyLibItem(item, kind) {
-  // 如果是从工作室或自定义上下文调用的，优先走目标注入回调
-  if (libTargetContext) {
-    handleTargetContextInsert(item, kind, libTargetContext);
+/* 把片段应用到主工作区（或调用来源）；成功后关闭片段库 */
+function applyLibItem(item) {
+  const kind = item.kind;
+  if (lib.target) {
+    handleTargetContextInsert(item, kind, lib.target);
     closePromptLibrary();
     return;
   }
 
+  const content = String(item.content || '').trim();
+  if (kind !== 'character' && !content) return toast('该片段内容为空', true);
+  const inp = $('promptInp');
+
   if (kind === 'painter') {
-    const inp = $('promptInp');
-    const content = String(item.content || '').trim();
-    if (!content) return toast('该片段内容为空', true);
-    if (inp.value.includes(content)) {
-      toast(`已存在相同片段：${item.title}`);
-      return;
-    }
+    if (inp.value.includes(content)) return toast(`提示词里已包含：${item.title}`);
     insertAtCursor(inp, content);
     toast(`已插入画师串：${item.title}`);
-    closePromptLibrary();
   } else if (kind === 'action') {
-    const inp = $('promptInp');
-    const content = String(item.content || '').trim();
-    if (!content) return toast('该片段内容为空', true);
-
-    // 动作串插入：若当前聚焦在光标处则插入光标处，否则追加在末尾
-    const isFocused = document.activeElement === inp;
-    if (isFocused && inp.selectionStart !== inp.selectionEnd) {
+    // 有选区时替换选区，否则追加在末尾
+    if (document.activeElement === inp && inp.selectionStart !== inp.selectionEnd) {
       insertAtCursor(inp, content);
     } else {
       const val = inp.value.trim();
-      if (!val) {
-        inp.value = content;
-      } else {
-        inp.value = val.replace(/,+$/, '') + ', ' + content;
-      }
+      inp.value = val ? `${val.replace(/,+$/, '')}, ${content}` : content;
       inp.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    toast(`已追加动作串：${item.title}`);
-    closePromptLibrary();
+    toast(`已追加动作串：${libDisplayTitle(item, kind)}`);
   } else if (kind === 'main') {
-    const inp = $('promptInp');
-    const content = String(item.content || '').trim();
-    if (!content) return toast('该主串内容为空', true);
-
-    if (inp.value.trim()) {
-      if (!confirm(`应用主串【${item.title}】将替换当前提示词的所有内容，确定继续吗？`)) {
-        return;
-      }
-    }
+    if (inp.value.trim() && inp.value.trim() !== content && !confirm(`应用主串【${item.title}】将替换当前提示词的所有内容，确定继续吗？`)) return;
     inp.value = content;
     inp.dispatchEvent(new Event('input', { bubbles: true }));
     toast(`已替换为主串：${item.title}`);
-    closePromptLibrary();
   } else if (kind === 'uc') {
-    const ucInp = $('ucInp');
-    const content = String(item.content || '').trim();
-    if (!content) return toast('该 UC 片段内容为空', true);
-
-    insertAtCursor(ucInp, content);
-    toast(`已插入 UC 片段：${item.title}`);
-    closePromptLibrary();
+    insertAtCursor($('ucInp'), content);
+    toast(`已插入 UC：${item.title}`);
   } else if (kind === 'character') {
-    if (CHARS.length >= 22) {
-      toast('角色上限为 22 个，无法继续添加', true);
-      return;
-    }
-    try {
-      const raw = typeof item.content === 'string' ? JSON.parse(item.content) : item.content;
-      const charObj = {
-        prompt: formatCharPromptXxxIp(String(raw?.prompt || '').trim()),
-        uc: String(raw?.uc || '').trim(),
-        x: typeof raw?.x === 'number' && !isNaN(raw.x) ? Math.max(0, Math.min(1, raw.x)) : null,
-        y: typeof raw?.y === 'number' && !isNaN(raw.y) ? Math.max(0, Math.min(1, raw.y)) : null,
-      };
-      CHARS.push(charObj);
-      activeCharIndex = CHARS.length - 1;
-      renderChars();
-      toast(`已将角色【${item.title}】导入至独立角色面板`);
-      closePromptLibrary();
-    } catch (err) {
-      toast(`角色数据反序列化失败：${err.message}`, true);
-    }
+    if (CHARS.length >= 22) return toast('角色上限为 22 个，无法继续添加', true);
+    const c = parseLibCharContent(item);
+    CHARS.push({ prompt: formatCharPromptXxxIp(c.prompt.trim()), uc: c.uc.trim(), x: c.x, y: c.y });
+    activeCharIndex = CHARS.length - 1;
+    renderChars();
+    toast(`已将角色【${libDisplayTitle(item, kind)}】导入至独立角色面板`);
   }
+  closePromptLibrary();
 }
 
 function bindPromptLibrary() {
-  // 入口按钮监听
   $('promptLibBtn')?.addEventListener('click', () => openPromptLibrary('painter'));
   $('ucLibBtn')?.addEventListener('click', () => openPromptLibrary('uc'));
   $('charFromLibBtn')?.addEventListener('click', () => openPromptLibrary('character'));
 
-  // 关闭与背景点击
-  $('promptLibCloseBtn')?.addEventListener('click', closePromptLibrary);
-  $('promptLibModal')?.addEventListener('click', (e) => {
-    // 点击弹窗内除当前 popover 及其触发按钮以外的区域时，关闭浮层
-    if (activeLibPopover && !activeLibPopover.menu.contains(e.target) && !activeLibPopover.trigger.contains(e.target)) {
-      closeActiveLibPopover();
-    }
-    if (e.target === $('promptLibModal')) closePromptLibrary();
+  const modal = $('promptLibModal');
+  $('promptLibCloseBtn').addEventListener('click', closePromptLibrary);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closePromptLibrary();
   });
-  // 全局点击监听，若在弹窗外点击也关闭浮层
-  document.addEventListener('click', (e) => {
-    if (activeLibPopover && !activeLibPopover.menu.contains(e.target) && !activeLibPopover.trigger.contains(e.target)) {
-      closeActiveLibPopover();
-    }
+  $('promptLibTabNav').addEventListener('click', (e) => {
+    const tab = e.target.closest('.pl-kind');
+    if (tab) switchPromptLibKind(tab.dataset.kind);
   });
-  // 滚动、窗口缩放、ESC按键时关闭浮层，避免 fixed 菜单脱离触发按钮
-  window.addEventListener('scroll', closeActiveLibPopover, true);
-  window.addEventListener('resize', closeActiveLibPopover);
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && activeLibPopover) {
-      closeActiveLibPopover();
-    }
-  });
-  // 顶部 5 个 Kind 分区 Tab 切换
-  document.querySelectorAll('#promptLibTabNav .nav-tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-      const kind = tab.dataset.kind;
-      if (kind) switchPromptLibKind(kind);
-    });
-  });
-  // 新增片段卡片折叠开关
-  $('libAddCardHead')?.addEventListener('click', () => {
-    closeActiveLibPopover();
-    libAddFormCollapsed = !libAddFormCollapsed;
-    $('libAddCard')?.classList.toggle('collapsed', libAddFormCollapsed);
+  $('plGroups').addEventListener('click', (e) => {
+    const chip = e.target.closest('.pl-group');
+    if (!chip) return;
+    writeLibGroup(lib.kind, chip.dataset.group);
+    $('plBody').scrollTop = 0;
+    renderLibrary();
   });
 
-
-  // 角色站位模式切换 (Auto vs Manual)
-  let charPosMode = 'auto'; // 'auto' | 'manual'
-  const autoBtn = $('libCharPosAutoBtn');
-  const manualBtn = $('libCharPosManualBtn');
-  const coordWrap = $('libCharCoordInputs');
-
-  autoBtn?.addEventListener('click', () => {
-    charPosMode = 'auto';
-    autoBtn.classList.add('active');
-    manualBtn?.classList.remove('active');
-    coordWrap?.classList.add('hidden');
+  let searchTimer = 0;
+  $('plSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { lib.query = e.target.value.trim(); renderLibrary(); }, 80);
   });
-
-  manualBtn?.addEventListener('click', () => {
-    charPosMode = 'manual';
-    manualBtn.classList.add('active');
-    autoBtn?.classList.remove('active');
-    coordWrap?.classList.remove('hidden');
-  });
-
-  // 新增片段表单提交
-  $('libAddForm')?.addEventListener('submit', async (e) => {
+  $('plSearch').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
     e.preventDefault();
-    const title = $('libItemTitle').value.trim();
-    if (!title) return toast('请输入片段标题', true);
+    clearTimeout(searchTimer);
+    lib.query = e.target.value.trim();
+    renderLibrary();
+    $('libItemsList').querySelector('.pl-card')?.click();
+  });
+  $('plNewBtn').addEventListener('click', () => openLibEditor(null));
+  $('plExportBtn').addEventListener('click', exportLibrary);
+  $('plImportBtn').addEventListener('click', () => $('plImportFile').click());
+  $('plImportFile').addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) importLibraryFile(file);
+  });
 
-    let content = '';
-    if (currentLibKind === 'character') {
-      const charPrompt = formatCharPromptXxxIp($('libCharPrompt').value.trim());
-      const charUc = $('libCharUc').value.trim();
-      let posX = null;
-      let posY = null;
-      if (charPosMode === 'manual') {
-        const parsedX = parseFloat($('libCharPosX').value);
-        const parsedY = parseFloat($('libCharPosY').value);
-        posX = !isNaN(parsedX) ? Math.max(0, Math.min(1, +parsedX.toFixed(3))) : 0.5;
-        posY = !isNaN(parsedY) ? Math.max(0, Math.min(1, +parsedY.toFixed(3))) : 0.5;
-      }
-      const charData = { prompt: charPrompt, uc: charUc, x: posX, y: posY };
-      content = JSON.stringify(charData);
+  // 卡片点击统一委托：按钮执行对应操作，点卡片其余位置即插入
+  const list = $('libItemsList');
+  list.addEventListener('click', (e) => {
+    const actBtn = e.target.closest('[data-act]');
+    if (actBtn?.dataset.act === 'new') return openLibEditor(null);
+    if (actBtn?.dataset.act === 'retry') return loadLibrary();
+    const card = e.target.closest('.pl-card');
+    const item = card && lib.items.find((it) => it.id === Number(card.dataset.id));
+    if (!item) return;
+    if (actBtn) {
+      e.stopPropagation();
+      libCardAction(actBtn.dataset.act, item);
+    } else if (lib.armedDelete !== null) {
+      disarmLibDelete();
+      renderLibrary();
     } else {
-      content = $('libItemContent').value.trim();
-      if (!content) return toast('请输入提示词内容', true);
+      applyLibItem(item);
     }
+  });
+  list.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('pl-card')) {
+      e.preventDefault();
+      e.target.click();
+    }
+  });
 
-    const saveBtn = $('libSaveBtn');
-    saveBtn.disabled = true;
-    try {
-      const res = await api('/api/prompts', {
-        method: 'POST',
-        body: JSON.stringify({
-          kind: currentLibKind,
-          title,
-          content,
-        }),
-      });
-      toast('片段已保存');
-      $('libItemTitle').value = '';
-      $('libItemContent').value = '';
-      $('libCharPrompt').value = '';
-      $('libCharUc').value = '';
-      fetchAndRenderLibItems(currentLibKind);
-    } catch (err) {
-      toast(`保存失败：${err.message}`, true);
-    } finally {
-      saveBtn.disabled = false;
+  // Esc 逐级退出：编辑器 → 搜索词 → 关闭弹窗；“/” 聚焦搜索
+  modal.addEventListener('keydown', (e) => {
+    const typing = e.target.matches('input, textarea, select');
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      if (lib.editing) { closeLibEditor(); renderLibrary(); return; }
+      if (lib.query || (e.target === $('plSearch') && $('plSearch').value)) {
+        $('plSearch').value = '';
+        lib.query = '';
+        renderLibrary();
+        return;
+      }
+      closePromptLibrary();
+    } else if (e.key === '/' && !typing) {
+      e.preventDefault();
+      $('plSearch').focus();
     }
   });
 }
@@ -3212,63 +2973,352 @@ async function loadHistory() {
 }
 
 /* ═════════════════════════════════════════════════════════════
-   Anlas 额度弹窗
+   密钥池：顶栏 Anlas 徽章、概况弹窗、管理后台「PST 密钥池」页共用一份快照
+   快照先读数据库（秒开），再按需向 NovelAI 实时同步。
    ═════════════════════════════════════════════════════════════ */
-async function showAnlasModal() {
-  const bg = document.createElement('div');
-  bg.className = 'modal-backdrop';
-  bg.innerHTML = `
-    <div class="modal-window profile-window" style="max-width:560px;">
-      <div class="modal-title-row">
-        <h3>💎 PST 密钥池储备 & V5 充能池 <button class="btn icon-btn close">✕</button></h3>
-      </div>
-      <div id="anlasModalBody" style="font-size:12.5px;max-height:68vh;overflow-y:auto;">查询中…</div>
+const pool = {
+  data: null,        // { items, summary, nextFreeKeyId, live, errors, refreshedAt }
+  syncing: false,
+  editing: null,     // 正在行内编辑的密钥 id
+  armedDelete: null,
+  armedTimer: 0,
+};
+const NAI_TIER_NAMES = ['Paper', 'Tablet', 'Scroll', 'Opus'];
+
+const fmtNum = (n) => Number(n || 0).toLocaleString('en-US');
+
+/** 解析 SQLite 的 UTC 时间（YYYY-MM-DD HH:MM:SS）或 ISO 字符串 */
+function parseServerTime(s) {
+  if (!s) return null;
+  const d = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s) ? new Date(`${s.replace(' ', 'T')}Z`) : new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function timeAgo(s) {
+  const d = parseServerTime(s);
+  if (!d) return '从未';
+  const sec = (Date.now() - d.getTime()) / 1000;
+  if (sec < 60) return '刚刚';
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
+  return `${Math.floor(sec / 86400)} 天前`;
+}
+
+function keyStatus(k) {
+  const state = String(k.verify_state || '');
+  if (state.startsWith('invalid')) return { cls: 'bad', text: '失效', title: state.slice(8) || '验证未通过' };
+  if (!k.is_active) return { cls: 'off', text: '已停用', title: '手动停用，不参与调度' };
+  if (!state) return { cls: 'warn', text: '未验证', title: '尚未成功查询过订阅' };
+  return { cls: 'ok', text: '正常', title: '参与调度' };
+}
+
+function expiryInfo(sec) {
+  if (!sec) return { cls: '', text: '—' };
+  const ms = sec * 1000;
+  const days = Math.ceil((ms - Date.now()) / 86400000);
+  const date = new Date(ms).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
+  if (days < 0) return { cls: 'bad', text: `已过期 ${date}` };
+  if (days <= 7) return { cls: 'warn', text: `${days} 天后到期` };
+  return { cls: '', text: date };
+}
+
+function batteryHtml(v) {
+  if (typeof v !== 'number') {
+    return `<div class="battery-row"><span class="battery-label">${icon('battery')}V5 充能</span><span class="battery"></span><b class="battery-val">—</b></div>`;
+  }
+  const cls = v > 100 ? 'over' : v > 40 ? 'ok' : v > 5 ? 'warn' : 'low';
+  const note = v > 100 ? '超充' : v <= 5 ? '保护中' : '';
+  return `<div class="battery-row" title="V5 充能 ${v}%${note ? `（${note}）` : ''}">
+      <span class="battery-label">${icon('battery')}V5 充能</span>
+      <span class="battery"><i class="${cls}" style="width:${Math.min(100, Math.max(3, v))}%"></i></span>
+      <b class="battery-val ${cls}">${v}%</b>${note ? `<span class="battery-note ${cls}">${note}</span>` : ''}
     </div>`;
-  document.body.appendChild(bg);
+}
 
-  const close = () => bg.remove();
-  bg.querySelector('.close').addEventListener('click', close);
-  bg.addEventListener('click', (e) => { if (e.target === bg) close(); });
+function poolStatsHtml(s) {
+  const tile = (name, label, value, sub, cls = '') => `<div class="pool-stat ${cls}">
+      <span class="pool-stat-icon">${icon(name)}</span>
+      <div class="pool-stat-body"><div class="pool-stat-val">${value}</div><div class="pool-stat-label">${label}</div><div class="pool-stat-sub">${sub}</div></div>
+    </div>`;
+  const down = s.total - s.healthy;
+  return [
+    tile('key', '可用节点', `${s.healthy}<small>/${s.total}</small>`, s.total ? (down ? `${down} 个停用或失效` : '全部正常') : '还没有添加密钥', s.total && !s.healthy ? 'bad' : ''),
+    tile('gem', '全池 Anlas', fmtNum(s.totalAnlas), '仅统计可用节点'),
+    tile('battery', 'V5 平均充能', s.avgBattery == null ? '—' : `${s.avgBattery}%`, `${s.opus} 个 Opus 节点`),
+    tile('zap', '可免费出图', `${s.freeReady}<small>/${s.opus}</small>`,
+      !s.opus ? '没有 Opus 节点' : s.freeReady ? '充能 > 5% 的 Opus' : '全部保护中，出图将扣 Anlas',
+      s.opus && !s.freeReady ? 'warn' : ''),
+  ].join('');
+}
 
-  try {
-    const j = await api('/api/anlas');
-    $('anlasBadge').textContent = `${j.totalAnlas} Anlas`;
-    let html = j.keys.map((k) => {
-      const v5Bat = typeof k.v5Battery === 'number'
-        ? `<span style="color:${k.v5Battery > 20 ? '#34d399' : '#f87171'};font-weight:600;">⚡ V5池: ${k.v5Battery}%</span>`
-        : '<span style="color:var(--text-dim);">V5池: —</span>';
-      const displayEmail = k.email || (k.label && k.label.includes('@') ? k.label : null);
-      const emailBadge = displayEmail
-        ? `<div style="font-size:11.5px;font-family:var(--font-mono);color:var(--primary-light);margin-bottom:4px;">📧 ${esc(displayEmail)}</div>`
-        : '<div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">📧 账号未绑定邮箱</div>';
-      return `
-        <div class="anlas-key-row" style="padding:10px 0;border-bottom:1px solid var(--border-subtle);">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
-            <strong style="font-size:13px;">${esc(k.label)}</strong>
-            <span class="cost-tag" style="padding:2px 8px;font-size:11px;">${esc(k.tier)}</span>
-          </div>
-          ${emailBadge}
-          <div style="display:flex;justify-content:space-between;color:var(--text-dim);font-size:12px;">
-            <span>${v5Bat}</span>
-            <span>Anlas: <strong style="color:var(--text-main);">${k.anlas ?? '—'}</strong> ${k.error ? '<span style="color:var(--err)">(' + esc(k.error.slice(0, 30)) + ')</span>' : ''}</span>
-          </div>
-        </div>`;
-    }).join('');
-    if (!j.keys.length) html = '<div class="anlas-key-row">池内暂无可用的活跃密钥</div>';
-    html += `
-      <div class="anlas-total-row" style="margin-top:12px;padding-top:8px;font-size:13px;display:flex;justify-content:space-between;align-items:center;">
-        <span><strong>总计可用节点：</strong>${j.activeCount} 个</span>
-        <span><strong>全池 Anlas 合计：</strong><strong style="color:#a78bfa;font-size:15px;">${j.totalAnlas}</strong></span>
+function keyCardHtml(k, { manage = false } = {}) {
+  const d = pool.data || {};
+  const st = keyStatus(k);
+  const email = k.email || (k.label?.includes('@') ? k.label : '');
+  const exp = expiryInfo(k.expires_at);
+  const editing = manage && pool.editing === k.id;
+  const armed = pool.armedDelete === k.id;
+  const error = d.errors?.[k.id];
+  const tier = NAI_TIER_NAMES[k.tier] || '未知';
+  const head = editing
+    ? `<input class="styled-admin-input key-edit-label" value="${esc(k.label)}" maxlength="60" placeholder="备注标签" aria-label="备注标签">`
+    : `<b class="key-label" title="${esc(k.label)}">${esc(k.label)}</b>`;
+  const sub = editing
+    ? `<input class="styled-admin-input key-edit-email" value="${esc(email)}" maxlength="120" placeholder="账号邮箱（选填）" aria-label="账号邮箱">`
+    : `<span class="key-email">${email ? esc(email) : '<span class="pl-muted">未绑定邮箱</span>'}</span>`;
+  const actions = !manage ? '' : editing
+    ? `<div class="key-actions"><span></span><div>
+        <button type="button" class="btn ghost-btn tiny" data-act="cancel">取消</button>
+        <button type="button" class="btn primary tiny" data-act="save">${icon('check')}<span>保存</span></button></div></div>`
+    : `<div class="key-actions"><span class="pl-muted" title="余额与充能的最近同步时间">同步于 ${timeAgo(k.anlas_checked_at)}</span><div>
+        <button type="button" class="pl-act" data-act="edit" title="编辑备注 / 邮箱" aria-label="编辑">${icon('edit')}</button>
+        <button type="button" class="pl-act" data-act="verify" title="重新验证（通过后自动启用）" aria-label="测试">${icon('activity')}</button>
+        <button type="button" class="pl-act" data-act="toggle" title="${k.is_active ? '停用' : '启用'}" aria-label="${k.is_active ? '停用' : '启用'}">${icon('power')}</button>
+        <button type="button" class="pl-act danger${armed ? ' armed' : ''}" data-act="del" title="${armed ? '再点一次确认删除' : '删除'}" aria-label="删除">${icon('trash')}${armed ? '<span>确认删除</span>' : ''}</button>
+      </div></div>`;
+  return `<article class="key-card ${st.cls}${editing ? ' is-editing' : ''}" data-id="${k.id}">
+      <div class="key-card-head">
+        <span class="key-status ${st.cls}" title="${esc(st.title)}">${st.text}</span>
+        ${head}
+        ${k.id === d.nextFreeKeyId ? `<span class="key-next" title="下一张免费 V5 图会优先派给这个节点">${icon('zap')}优先</span>` : ''}
+        <span class="key-tier${k.tier === 3 ? ' opus' : ''}">${esc(tier)}</span>
       </div>
-      <div style="margin-top:10px;font-size:11.5px;color:var(--text-dim);line-height:1.5;background:rgba(255,255,255,0.03);padding:8px 10px;border-radius:6px;">
-        ℹ️ <strong>NovelAI V5 额度机制提示</strong>：<br>
-        V5 模型免费生图（≤1024×1024, ≤28步, 单张）采用<strong>动态充能池</strong>（初始最高可达 180%，空槽充满约需一周，每小时自动回血）。池内电量耗尽后将自动消耗 Anlas。
-      </div>`;
-    bg.querySelector('#anlasModalBody').innerHTML = html;
-  } catch (e) {
-    bg.querySelector('#anlasModalBody').innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
+      <div class="key-sub">${sub}<code title="密钥预览">${esc(k.token_preview || '')}</code></div>
+      ${batteryHtml(k.v5_battery)}
+      <div class="key-facts">
+        <span><em>Anlas</em><b>${k.anlas == null ? '—' : fmtNum(k.anlas)}</b></span>
+        <span><em>调用</em><b>${fmtNum(k.use_count)}</b></span>
+        <span><em>最近使用</em><b>${timeAgo(k.last_used_at)}</b></span>
+        <span class="${exp.cls}"><em>订阅到期</em><b>${exp.text}</b></span>
+      </div>
+      ${error ? `<div class="key-error">${icon('alert')}<span>同步失败：${esc(error)}</span></div>` : ''}
+      ${actions}
+    </article>`;
+}
+
+function poolSyncText(d, { syncing = false } = {}) {
+  if (!d) return '读取中…';
+  if (syncing) return '正在向 NovelAI 同步余额与充能…';
+  if (d.live && d.refreshedAt) return `已实时同步 · ${timeAgo(d.refreshedAt)}`;
+  const latest = d.items.map((k) => k.anlas_checked_at).filter(Boolean).sort().at(-1);
+  return latest ? `数据同步于 ${timeAgo(latest)}` : '尚未同步';
+}
+
+function applyPoolData(d) {
+  pool.data = d;
+  $('anlasBadge').textContent = `${fmtNum(d.summary.totalAnlas)} Anlas`;
+  $('anlasBtn').title = `密钥池：${d.summary.healthy}/${d.summary.total} 个节点可用 · 可免费出图 ${d.summary.freeReady} 个`;
+  renderPoolViews();
+}
+
+/** 只重绘当前可见的视图 */
+function renderPoolViews() {
+  const d = pool.data;
+  if (!d) return;
+  const sync = poolSyncText(d, { syncing: pool.syncing });
+  document.querySelectorAll('.pool-sync-btn').forEach((b) => {
+    b.disabled = pool.syncing;
+    b.classList.toggle('spinning', pool.syncing);
+  });
+  if (!$('poolModal').classList.contains('hidden')) {
+    $('poolModalSync').textContent = sync;
+    $('poolModalStats').innerHTML = poolStatsHtml(d.summary);
+    const keys = [...d.items].sort((a, b) => (b.id === d.nextFreeKeyId) - (a.id === d.nextFreeKeyId)
+      || (keyStatus(a).cls === 'ok' ? 0 : 1) - (keyStatus(b).cls === 'ok' ? 0 : 1) || a.id - b.id);
+    $('poolModalKeys').innerHTML = keys.length
+      ? keys.map((k) => keyCardHtml(k)).join('')
+      : `<div class="pl-empty">${icon('key')}<b>池中还没有密钥</b><span>到管理后台添加 NovelAI PST 后，这里会显示余额与充能</span></div>`;
+  }
+  if (!$('adminModal').classList.contains('hidden') && !$('tab-keys').classList.contains('hidden')) {
+    $('poolSyncInfo').textContent = sync;
+    $('poolStats').innerHTML = poolStatsHtml(d.summary);
+    $('keysList').innerHTML = d.items.length
+      ? d.items.map((k) => keyCardHtml(k, { manage: true })).join('')
+      : `<div class="pl-empty">${icon('key')}<b>还没有添加 PST 密钥</b><span>添加后会自动验证并同步订阅等级、Anlas 余额与 V5 充能</span></div>`;
+    if (!d.items.length) $('keyAddForm').classList.remove('hidden');
   }
 }
+
+async function loadPoolBadge() {
+  try { applyPoolData(await api('/api/anlas?cached=1')); } catch { /* 徽章保持“查询额度” */ }
+}
+
+/** 向 NovelAI 实时查询；force=true 跳过服务端 30 秒缓存 */
+async function syncPool(force = false) {
+  if (pool.syncing) return;
+  pool.syncing = true;
+  renderPoolViews();
+  try {
+    const d = await api(`/api/anlas${force ? '?refresh=1' : ''}`);
+    pool.syncing = false;
+    applyPoolData(d);
+    const failed = Object.keys(d.errors || {}).length;
+    if (force) toast(failed ? `同步完成，${failed} 个节点查询失败` : '已同步最新余额与充能', failed > 0);
+  } catch (e) {
+    pool.syncing = false;
+    renderPoolViews();
+    toast(e.message, true);
+  }
+}
+
+async function showPoolModal() {
+  $('poolModal').classList.remove('hidden');
+  if (pool.data) renderPoolViews();
+  else {
+    $('poolModalSync').textContent = '读取中…';
+    $('poolModalStats').innerHTML = '';
+    $('poolModalKeys').innerHTML = '<div class="pl-empty pl-loading"><span class="pl-spinner"></span><span>读取密钥池…</span></div>';
+    await loadPoolBadge();
+  }
+  syncPool(false);
+}
+
+function closePoolModal() {
+  $('poolModal').classList.add('hidden');
+}
+
+async function loadKeys() {
+  try {
+    const d = await api('/api/admin/keys');
+    // 管理页的快照来自数据库；沿用上次实时同步得到的错误信息直到下次同步
+    applyPoolData({ ...d, live: false, errors: pool.data?.errors || {}, refreshedAt: pool.data?.refreshedAt });
+  } catch (e) { toast(e.message, true); }
+}
+
+async function keyAction(id, body, okMsg) {
+  try {
+    const j = await api(`/api/admin/keys/${id}`, { method: 'POST', body: JSON.stringify(body) });
+    if (okMsg) toast(typeof okMsg === 'function' ? okMsg(j) : okMsg, j?.verify && !j.verify.ok);
+    if (pool.data?.errors) delete pool.data.errors[id];
+  } catch (e) { toast(e.message, true); }
+  await loadKeys();
+}
+
+function disarmKeyDelete() {
+  clearTimeout(pool.armedTimer);
+  pool.armedDelete = null;
+}
+
+function bindPoolViews() {
+  $('anlasBtn').addEventListener('click', showPoolModal);
+  $('poolModalClose').addEventListener('click', closePoolModal);
+  $('poolModal').addEventListener('click', (e) => { if (e.target === $('poolModal')) closePoolModal(); });
+  document.querySelectorAll('.pool-sync-btn').forEach((b) => b.addEventListener('click', () => syncPool(true)));
+  $('poolManageBtn').addEventListener('click', () => {
+    closePoolModal();
+    $('adminModal').classList.remove('hidden');
+    document.querySelector('#adminModal .admin-tab-nav .nav-tab[data-tab=keys]').click();
+  });
+
+  // 添加密钥
+  $('keyAddToggle').addEventListener('click', () => {
+    const form = $('keyAddForm');
+    form.classList.toggle('hidden');
+    if (!form.classList.contains('hidden')) $('keyLabel').focus();
+  });
+  $('keyAddCancel').addEventListener('click', () => $('keyAddForm').classList.add('hidden'));
+  $('keyPasteBtn').addEventListener('click', async () => {
+    try {
+      const txt = await navigator.clipboard.readText();
+      if (txt) {
+        $('keyToken').value = txt.trim();
+        toast('已从剪贴板粘贴密钥');
+      }
+    } catch {
+      $('keyToken').focus();
+      toast('请使用 Ctrl+V 粘贴至输入框');
+    }
+  });
+  $('keyAddForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('keyAdd');
+    btn.disabled = true;
+    try {
+      const j = await api('/api/admin/keys', {
+        method: 'POST',
+        body: JSON.stringify({ label: $('keyLabel').value.trim(), token: $('keyToken').value.trim(), email: $('keyEmail').value.trim() }),
+      });
+      toast(j.verify?.ok ? '密钥验证通过，已加入密钥池' : `已入库但验证未通过：${j.verify?.error || ''}`, !j.verify?.ok);
+      $('keyAddForm').reset();
+      $('keyAddForm').classList.add('hidden');
+      loadKeys();
+    } catch (err) { toast(err.message, true); }
+    finally { btn.disabled = false; }
+  });
+
+  // 测试全部：逐个重新验证，通过的自动启用，失败的停用
+  $('adminTestAllBtn').addEventListener('click', async () => {
+    const btn = $('adminTestAllBtn');
+    btn.disabled = true;
+    btn.classList.add('spinning');
+    try {
+      const j = await api('/api/admin/keys/test-all', { method: 'POST' });
+      const pass = j.results.filter((r) => r.ok).length;
+      toast(`测试完成：${pass}/${j.results.length} 个可用`, pass < j.results.length);
+      if (pool.data) pool.data.errors = {};
+      await loadKeys();
+      loadStats();
+    } catch (e) { toast(e.message, true); }
+    finally {
+      btn.disabled = false;
+      btn.classList.remove('spinning');
+    }
+  });
+
+  // 密钥卡片操作统一委托
+  const list = $('keysList');
+  const saveEdit = (card, id) => {
+    const label = card.querySelector('.key-edit-label').value.trim();
+    if (!label) return toast('备注标签不能为空', true);
+    pool.editing = null;
+    keyAction(id, { action: 'edit', label, email: card.querySelector('.key-edit-email').value.trim() }, '已保存');
+  };
+  list.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    const card = e.target.closest('.key-card');
+    if (!btn || !card) return;
+    const id = Number(card.dataset.id);
+    const k = pool.data?.items.find((x) => x.id === id);
+    if (!k) return;
+    const act = btn.dataset.act;
+    if (act !== 'del') disarmKeyDelete();
+    if (act === 'edit') {
+      pool.editing = id;
+      renderPoolViews();
+      list.querySelector(`.key-card[data-id="${id}"] .key-edit-label`)?.focus();
+    } else if (act === 'cancel') {
+      pool.editing = null;
+      renderPoolViews();
+    } else if (act === 'save') {
+      saveEdit(card, id);
+    } else if (act === 'verify') {
+      btn.disabled = true;
+      btn.classList.add('spinning');
+      keyAction(id, { action: 'verify' }, (j) => (j.verify?.ok ? `「${k.label}」验证通过` : `「${k.label}」验证失败：${j.verify?.error || ''}`));
+    } else if (act === 'toggle') {
+      keyAction(id, { action: 'toggle' }, k.is_active ? `已停用「${k.label}」` : `已启用「${k.label}」`);
+    } else if (act === 'del') {
+      if (pool.armedDelete !== id) {
+        disarmKeyDelete();
+        pool.armedDelete = id;
+        pool.armedTimer = setTimeout(() => { pool.armedDelete = null; renderPoolViews(); }, 4000);
+        return renderPoolViews();
+      }
+      disarmKeyDelete();
+      api(`/api/admin/keys/${id}`, { method: 'DELETE' })
+        .then(() => toast(`已删除「${k.label}」`))
+        .catch((err) => toast(err.message, true))
+        .finally(loadKeys);
+    }
+  });
+  list.addEventListener('keydown', (e) => {
+    const card = e.target.closest('.key-card.is-editing');
+    if (!card) return;
+    if (e.key === 'Enter') { e.preventDefault(); saveEdit(card, Number(card.dataset.id)); }
+    if (e.key === 'Escape') { e.stopPropagation(); pool.editing = null; renderPoolViews(); }
+  });
+}
+
 /* ═════════════════════════════════════════════════════════════
    管理员管理后台弹窗
    ═════════════════════════════════════════════════════════════ */
@@ -3300,6 +3350,7 @@ function bindAdminModal() {
       $('adminModal').classList.add('hidden');
       $('profileModal').classList.add('hidden');
       $('lightboxModal').classList.add('hidden');
+      closePoolModal();
       closePromptLibrary();
     }
   });
@@ -3312,50 +3363,6 @@ function bindAdminModal() {
       $(`tab-${tab.dataset.tab}`).classList.remove('hidden');
       loadActiveAdminTab();
     });
-  });
-
-  // 测试全部密钥有效性
-  $('adminTestAllBtn').addEventListener('click', async () => {
-    const btn = $('adminTestAllBtn');
-    btn.disabled = true;
-    btn.textContent = '测试中…';
-    try {
-      const j = await api('/api/admin/keys/test-all', { method: 'POST' });
-      const pass = j.results.filter((r) => r.ok).length;
-      toast(`测试完成：${pass}/${j.results.length} 正常可用`);
-      loadKeys();
-      loadStats();
-    } catch (e) { toast(e.message, true); }
-    finally {
-      btn.disabled = false;
-      btn.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-zap"/></svg><span>测试全部密钥</span>';
-    }
-  });
-  // 一键粘贴密钥
-  $('keyPasteBtn').addEventListener('click', async () => {
-    try {
-      const txt = await navigator.clipboard.readText();
-      if (txt) {
-        $('keyToken').value = txt.trim();
-        toast('已从剪贴板粘贴密钥');
-      }
-    } catch {
-      $('keyToken').focus();
-      toast('请使用 Ctrl+V 粘贴至输入框');
-    }
-  });
-
-  $('keyAdd').addEventListener('click', async () => {
-    const label = $('keyLabel').value.trim();
-    const email = $('keyEmail')?.value.trim() || '';
-    const token = $('keyToken').value.trim();
-    try {
-      const j = await api('/api/admin/keys', { method: 'POST', body: JSON.stringify({ label, token, email }) });
-      toast(j.verify?.ok ? '密钥已通过真实验证，成功入池' : `已入库但验证未过：${j.verify?.error || ''}`);
-      $('keyToken').value = '';
-      if ($('keyEmail')) $('keyEmail').value = '';
-      loadKeys();
-    } catch (e) { toast(e.message, true); }
   });
 
   const copyText = async (text) => {
@@ -3414,63 +3421,6 @@ function loadActiveAdminTab() {
   const loaders = { keys: loadKeys, users: loadUsers, tiers: loadTiers, gens: loadGens, stats: loadStats, plugin: loadPluginTokens };
   const active = document.querySelector('#adminModal .admin-tab-nav .nav-tab.active')?.dataset.tab || 'keys';
   return loaders[active]?.();
-}
-
-async function loadKeys() {
-  try {
-    const j = await api('/api/admin/keys');
-    const tb = $('keysTbl').querySelector('tbody');
-    tb.innerHTML = '';
-    for (const k of j.items) {
-      const tr = document.createElement('tr');
-      let batteryHtml = '—';
-      if (typeof k.v5_battery === 'number') {
-        const bat = k.v5_battery;
-        const color = bat > 40 ? '#34d399' : (bat > 5 ? '#fbbf24' : '#f87171');
-        const stateText = bat <= 5 ? ' (保护中)' : '';
-        batteryHtml = `<div style="display:flex;align-items:center;gap:6px;"><span style="color:${color};font-weight:700;">⚡ ${bat}%${stateText}</span></div>`;
-      }
-      const displayEmail = k.email || (k.label && k.label.includes('@') ? k.label : '未绑定');
-      tr.innerHTML = `
-        <td>${k.id}</td>
-        <td><strong style="color:var(--text-main);">${esc(k.label)}</strong> <button class="btn tiny ghost-btn act-edit-lbl" title="修改备注" style="padding:1px 4px;font-size:10px;">✏️</button></td>
-        <td><span style="font-family:var(--font-mono);color:${k.email || k.label.includes('@') ? 'var(--primary-light)' : 'var(--text-dim)'};">${esc(displayEmail)}</span> <button class="btn tiny ghost-btn act-edit-em" title="修改/绑定邮箱" style="padding:1px 4px;font-size:10px;">✏️</button></td>
-        <td><code>${esc(k.token_preview)}</code></td>
-        <td>${k.is_active ? '<span style="color:var(--ok)">✓ 启用中</span>' : '<span style="color:var(--text-dim)">已停用</span>'}${k.verify_state ? `<br><small style="color:var(--text-dim)">${esc(k.verify_state.slice(0, 24))}</small>` : ''}</td>
-        <td>${batteryHtml}</td>
-        <td>${k.tier ?? '—'}</td><td>${k.anlas ?? '—'}</td><td>${k.use_count}</td>
-        <td>
-          <button class="btn tiny ghost-btn act-tg">${k.is_active ? '停用' : '启用'}</button>
-          <button class="btn tiny ghost-btn act-vf">测试</button>
-          <button class="btn tiny ghost-btn act-dl">删除</button>
-        </td>`;
-      tr.querySelector('.act-edit-lbl').addEventListener('click', async () => {
-        const newLbl = prompt('输入新的备注标签：', k.label);
-        if (newLbl !== null && newLbl.trim() && newLbl.trim() !== k.label) {
-          await api(`/api/admin/keys/${k.id}`, { method: 'POST', body: JSON.stringify({ action: 'edit', label: newLbl.trim() }) });
-          toast('备注已更新');
-          loadKeys();
-        }
-      });
-      tr.querySelector('.act-edit-em').addEventListener('click', async () => {
-        const newEm = prompt('输入该 PST 对应的账号邮箱：', k.email || (k.label.includes('@') ? k.label : ''));
-        if (newEm !== null) {
-          await api(`/api/admin/keys/${k.id}`, { method: 'POST', body: JSON.stringify({ action: 'edit', email: newEm.trim() }) });
-          toast('对应邮箱已保存');
-          loadKeys();
-        }
-      });
-      tr.querySelector('.act-tg').addEventListener('click', () =>
-        api(`/api/admin/keys/${k.id}`, { method: 'POST', body: JSON.stringify({ action: 'toggle' }) }).then(loadKeys).catch((e) => toast(e.message, true)));
-      tr.querySelector('.act-vf').addEventListener('click', () =>
-        api(`/api/admin/keys/${k.id}`, { method: 'POST', body: JSON.stringify({ action: 'verify' }) }).then(loadKeys).catch((e) => toast(e.message, true)));
-      tr.querySelector('.act-dl').addEventListener('click', () => {
-        if (!confirm('确定删除该 PST 密钥？')) return;
-        api(`/api/admin/keys/${k.id}`, { method: 'DELETE' }).then(loadKeys).catch((e) => toast(e.message, true));
-      });
-      tb.appendChild(tr);
-    }
-  } catch (e) { toast(e.message, true); }
 }
 
 async function loadPluginTokens() {

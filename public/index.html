@@ -43,6 +43,21 @@
   <symbol id="i-tag" viewBox="0 0 24 24"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><path d="M7.5 7.5h.01"/></symbol>
   <symbol id="i-mail" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><path d="m5 9-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-corner" viewBox="0 0 24 24"><path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></symbol>
+  <symbol id="i-battery" viewBox="0 0 24 24"><rect x="2" y="7" width="16" height="10" rx="2"/><path d="M22 11v2M10.5 9.5 8.5 12h3l-2 2.5"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
 </svg>
 
 <!-- 1. 登录 -->
@@ -101,7 +116,7 @@
         <span id="galleryNavTxt">作品画廊</span>
       </button>
 
-      <button id="anlasBtn" class="pill-btn anlas-chip" title="查看当前密钥池 Anlas 余额">
+      <button id="anlasBtn" class="pill-btn anlas-chip" title="密钥池概况：Anlas 余额与 V5 充能">
         <svg class="ico chip-icon" aria-hidden="true"><use href="#i-gem"/></svg>
         <span id="anlasBadge">查询额度</span>
       </button>
@@ -751,110 +766,82 @@
     </div>
   </div>
 
-  <!-- 📚 片段库模态弹窗 -->
+  <!-- 片段库 -->
   <div id="promptLibModal" class="modal-backdrop hidden">
-    <div class="modal-window prompt-lib-window">
-      <div class="modal-title-row">
-        <div class="admin-top-title">
-          <span class="admin-crown">📚</span>
-          <span>片段库 · 提示词资产</span>
+    <div class="modal-window pl-window" role="dialog" aria-modal="true" aria-labelledby="plTitle">
+      <header class="pl-head">
+        <div class="pl-head-title">
+          <span class="pl-head-icon"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg></span>
+          <div>
+            <h3 id="plTitle">片段库 <span class="sec-en">Prompt Library</span></h3>
+            <p class="pl-head-sub">已保存 <b id="plTotal">0</b> / <span id="plLimit">500</span> 条</p>
+          </div>
         </div>
-        <div class="admin-top-actions">
-          <button type="button" id="promptLibCloseBtn" class="btn ghost-btn small">✕ 关闭</button>
+        <div class="pl-head-actions">
+          <button type="button" id="plImportBtn" class="btn ghost-btn small" title="从 JSON 文件导入（重复的自动跳过）"><svg class="ico" aria-hidden="true"><use href="#i-upload"/></svg><span>导入</span></button>
+          <button type="button" id="plExportBtn" class="btn ghost-btn small" title="把全部片段导出为 JSON 备份"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg><span>导出</span></button>
+          <button type="button" id="promptLibCloseBtn" class="btn ghost-btn small pl-close" title="关闭 (Esc)" aria-label="关闭"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+          <input type="file" id="plImportFile" accept="application/json,.json" hidden>
         </div>
+      </header>
+
+      <nav class="pl-kinds" id="promptLibTabNav" role="tablist" aria-label="片段分类">
+        <button type="button" data-kind="painter" class="pl-kind active" role="tab"><svg class="ico" aria-hidden="true"><use href="#i-palette"/></svg><span>画师串</span><em>…</em></button>
+        <button type="button" data-kind="action" class="pl-kind" role="tab"><svg class="ico" aria-hidden="true"><use href="#i-move"/></svg><span>动作串</span><em>…</em></button>
+        <button type="button" data-kind="uc" class="pl-kind" role="tab"><svg class="ico" aria-hidden="true"><use href="#i-ban"/></svg><span>UC</span><em>…</em></button>
+        <button type="button" data-kind="character" class="pl-kind" role="tab"><svg class="ico" aria-hidden="true"><use href="#i-users"/></svg><span>角色</span><em>…</em></button>
+        <button type="button" data-kind="main" class="pl-kind" role="tab"><svg class="ico" aria-hidden="true"><use href="#i-star"/></svg><span>主串</span><em>…</em></button>
+      </nav>
+
+      <div class="pl-toolbar">
+        <label class="pl-search">
+          <svg class="ico" aria-hidden="true"><use href="#i-search"/></svg>
+          <input id="plSearch" type="search" placeholder="搜索标题或内容，回车插入第一条" title="按 / 聚焦；回车插入第一条匹配" autocomplete="off" spellcheck="false" aria-label="搜索片段">
+          <kbd>/</kbd>
+        </label>
+        <button type="button" id="plNewBtn" class="btn primary small"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span>新建</span></button>
+      </div>
+      <div id="plGroups" class="pl-groups hidden" role="tablist" aria-label="分组"></div>
+
+      <div class="pl-body" id="plBody">
+        <div id="plEditorSlot"></div>
+        <div id="libItemsList" class="pl-list"></div>
       </div>
 
-      <div class="admin-tab-nav lib-tab-nav" id="promptLibTabNav">
-        <button type="button" data-kind="painter" class="nav-tab active">🎨 画师串</button>
-        <button type="button" data-kind="action" class="nav-tab">🏃 动作串</button>
-        <button type="button" data-kind="uc" class="nav-tab">🚫 UC片段</button>
-        <button type="button" data-kind="character" class="nav-tab">👥 角色</button>
-        <button type="button" data-kind="main" class="nav-tab">🌟 主串</button>
-      </div>
+      <footer class="pl-foot">
+        <svg class="ico" aria-hidden="true"><use href="#i-corner"/></svg><span id="plApplyHint">点击卡片插入</span>
+      </footer>
+    </div>
+  </div>
 
-      <!-- 新增片段卡片表单 -->
-      <div class="admin-card lib-add-card" id="libAddCard">
-        <div class="admin-card-head lib-add-card-head" id="libAddCardHead">
-          <div class="card-caption">
-            <svg class="ico caption-icon" aria-hidden="true"><use href="#i-plus"/></svg>
-            <span class="caption-title" id="libFormTitle">添加新片段</span><span class="lib-fold-hint">（点击折叠/展开）</span>
-          </div>
-          <div class="lib-add-head-right">
-            <span class="caption-tip" id="libFormTip">保存常用提示词，方便快速复用</span>
-            <span class="lib-add-arrow" id="libAddArrow">▼</span>
+  <!-- 密钥池概况（管理员） -->
+  <div id="poolModal" class="modal-backdrop hidden">
+    <div class="modal-window pool-window" role="dialog" aria-modal="true" aria-labelledby="poolTitle">
+      <header class="pl-head">
+        <div class="pl-head-title">
+          <span class="pl-head-icon"><svg class="ico" aria-hidden="true"><use href="#i-database"/></svg></span>
+          <div>
+            <h3 id="poolTitle">密钥池概况 <span class="sec-en">Key Pool</span></h3>
+            <p class="pl-head-sub" id="poolModalSync">读取中…</p>
           </div>
         </div>
-        <form id="libAddForm" class="lib-form">
-          <div class="lib-form-row">
-            <div class="lib-form-field title-field">
-              <label class="field-title">标题备注</label>
-              <input id="libItemTitle" class="styled-admin-input" placeholder="例如：水墨水彩混搭 / 战斗跳跃姿态 / 主角银发少女" required>
-            </div>
-          </div>
-
-          <!-- 常规单内容区域 (painter, action, uc, main) -->
-          <div id="libNormalContentWrap" class="lib-form-row">
-            <div class="lib-form-field">
-              <label class="field-title" id="libContentLabel">提示词内容</label>
-              <textarea id="libItemContent" class="styled-admin-input lib-textarea" rows="3" placeholder="填写提示词内容 tags..."></textarea>
-            </div>
-          </div>
-
-          <!-- 角色专属表单区域 (character) -->
-          <div id="libCharContentWrap" class="lib-char-form-wrap hidden">
-            <div class="lib-form-row">
-              <div class="lib-form-field">
-                <label class="field-title">角色独立提示词 (Prompt)</label>
-                <textarea id="libCharPrompt" class="styled-admin-input lib-textarea" rows="2" placeholder="raiden shogun (genshin impact)"></textarea>
-              </div>
-            </div>
-            <div class="lib-form-row">
-              <div class="lib-form-field">
-                <label class="field-title">角色排除词 (Negative / UC，选填)</label>
-                <input id="libCharUc" class="styled-admin-input" placeholder="bad anatomy, lowres...">
-              </div>
-            </div>
-            <div class="lib-form-row lib-char-pos-row">
-              <div class="lib-pos-mode-toggle">
-                <label class="field-title">站位模式</label>
-                <div class="char-mode-toggle">
-                  <button type="button" id="libCharPosAutoBtn" class="char-mode-btn active">自动位置 (Auto)</button>
-                  <button type="button" id="libCharPosManualBtn" class="char-mode-btn">指定坐标 (Manual)</button>
-                </div>
-              </div>
-              <div id="libCharCoordInputs" class="lib-coord-inputs hidden">
-                <label class="lib-coord-item">
-                  <span>X (水平 0.0~1.0):</span>
-                  <input type="number" id="libCharPosX" class="styled-admin-input tiny-num" min="0" max="1" step="0.05" value="0.5">
-                </label>
-                <label class="lib-coord-item">
-                  <span>Y (垂直 0.0~1.0):</span>
-                  <input type="number" id="libCharPosY" class="styled-admin-input tiny-num" min="0" max="1" step="0.05" value="0.5">
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <div class="lib-form-actions">
-            <button type="submit" id="libSaveBtn" class="btn primary glow small">
-              <span>保存到片段库</span>
-              <span class="btn-sub-ico">💾</span>
-            </button>
-          </div>
-        </form>
-      </div>
-
-      <!-- 片段列表 -->
-      <div class="lib-list-container">
-        <div class="lib-list-head">
-          <span class="lib-list-title" id="libListTitle">已保存片段</span>
-          <span class="lib-list-tip" id="libListTip">点击条目可选择导入或复制</span>
+        <div class="pl-head-actions">
+          <button type="button" class="btn ghost-btn small pool-sync-btn" title="跳过缓存，立即向 NovelAI 查询"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg><span>刷新</span></button>
+          <button type="button" id="poolModalClose" class="btn ghost-btn small pl-close" title="关闭 (Esc)" aria-label="关闭"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
         </div>
-        <div id="libIpTabs" class="lib-ip-tabs hidden" role="tablist" aria-label="片段分组"></div>
-        <div id="libItemsList" class="lib-items-list">
-          <div class="lib-empty">加载中…</div>
+      </header>
+      <div class="pool-body">
+        <div id="poolModalStats" class="pool-stats compact"></div>
+        <div id="poolModalKeys" class="pool-keys"></div>
+        <div class="pool-note">
+          <svg class="ico" aria-hidden="true"><use href="#i-info"/></svg>
+          <p><b>V5 充能池</b>：Opus 账号用 V5 生成 ≤1024×1024、≤28 步、单张的图时消耗充能而不是 Anlas。充能最高可蓄到 180%，每小时自动恢复，从空到满约需一周；耗尽后改为扣 Anlas。本站把免费出图优先派给充能最高的 Opus 节点，充能 ≤5% 的节点进入保护、排到最后。</p>
         </div>
       </div>
+      <footer class="pl-foot">
+        <span class="pl-muted">余额来自各账号的订阅查询，30 秒内重复打开使用缓存</span>
+        <button type="button" id="poolManageBtn" class="btn ghost-btn small"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg><span>管理密钥</span></button>
+      </footer>
     </div>
   </div>
 
@@ -867,7 +854,6 @@
           <span>管理后台</span>
         </div>
         <div class="admin-top-actions">
-          <button id="adminTestAllBtn" class="btn primary small glow"><svg class="ico" aria-hidden="true"><use href="#i-zap"/></svg><span>测试全部密钥</span></button>
           <button id="adminCloseBtn" class="btn ghost-btn small"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg>关闭</button>
         </div>
       </div>
@@ -883,56 +869,58 @@
 
       <!-- Tab 1: 密钥池 -->
       <div id="tab-keys" class="tab-pane">
-        <div class="admin-card">
-          <div class="admin-card-head">
-            <div class="card-caption">
-              <svg class="ico caption-icon" aria-hidden="true"><use href="#i-plus"/></svg>
-              <span class="caption-title">添加 PST 密钥</span>
-            </div>
-            <span class="caption-tip">添加后自动验证有效性并同步订阅等级与 Anlas 余额</span>
+        <div id="poolStats" class="pool-stats"></div>
+        <div class="pool-toolbar">
+          <div class="pool-toolbar-title">
+            <b>PST 密钥</b>
+            <span id="poolSyncInfo" class="pl-muted">读取中…</span>
           </div>
-          <div class="admin-form-grid">
-            <div class="admin-field flex-1">
-              <label class="field-title">备注标签</label>
-              <div class="admin-input-wrap">
-                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-tag"/></svg>
-                <input id="keyLabel" placeholder="例如：主号 / 备用号" class="styled-admin-input">
-              </div>
-            </div>
-            <div class="admin-field flex-1">
-              <label class="field-title">对应绑定邮箱 (选填)</label>
-              <div class="admin-input-wrap">
-                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-mail"/></svg>
-                <input id="keyEmail" placeholder="例如：user@gmail.com" class="styled-admin-input">
-              </div>
-            </div>
-            <div class="admin-field flex-2">
-              <label class="field-title">NovelAI Persistent Token (PST)</label>
-              <div class="admin-input-wrap">
-                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-key"/></svg>
-                <input id="keyToken" placeholder="以 pst- 开头的完整持久密钥字符串" class="styled-admin-input mono">
-                <button type="button" id="keyPasteBtn" class="admin-inner-btn" title="粘贴剪贴板内容">📋 粘贴</button>
-              </div>
-            </div>
-            <div class="admin-field-action">
-              <button id="keyAdd" class="btn primary glow admin-add-btn">
-                <span>验证并添加</span>
-                <span class="btn-sub-ico">⚡</span>
-              </button>
-            </div>
+          <div class="pool-toolbar-actions">
+            <button type="button" class="btn ghost-btn small pool-sync-btn" title="向 NovelAI 实时查询每个启用中密钥的余额、充能与订阅（不改变启用状态）"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg><span>同步余额</span></button>
+            <button type="button" id="adminTestAllBtn" class="btn ghost-btn small" title="逐个重新验证全部密钥：通过的自动启用，失败的自动停用"><svg class="ico" aria-hidden="true"><use href="#i-activity"/></svg><span>测试全部</span></button>
+            <button type="button" id="keyAddToggle" class="btn primary small"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg><span>添加密钥</span></button>
           </div>
         </div>
 
-        <div class="table-container">
-          <table class="data-table" id="keysTbl">
-            <thead>
-              <tr>
-                <th>ID</th><th>备注标签</th><th>账号邮箱</th><th>密钥预览</th><th>状态</th><th>V5 充能电量</th><th>订阅级别</th><th>Anlas 余额</th><th>调用次数</th><th>操作</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
+        <form id="keyAddForm" class="admin-card key-add-card hidden" autocomplete="off">
+          <div class="admin-card-head">
+            <div class="card-caption">
+              <svg class="ico caption-icon" aria-hidden="true"><use href="#i-key"/></svg>
+              <span class="caption-title">添加 PST 密钥</span>
+            </div>
+            <span class="caption-tip">提交后立即向 NovelAI 验证，并同步订阅等级、Anlas 余额与 V5 充能</span>
+          </div>
+          <div class="admin-form-grid">
+            <div class="admin-field flex-1">
+              <label class="field-title" for="keyLabel">备注标签</label>
+              <div class="admin-input-wrap">
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-tag"/></svg>
+                <input id="keyLabel" placeholder="例如：主号 / 备用号" maxlength="60" class="styled-admin-input">
+              </div>
+            </div>
+            <div class="admin-field flex-1">
+              <label class="field-title" for="keyEmail">账号邮箱（选填）</label>
+              <div class="admin-input-wrap">
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-mail"/></svg>
+                <input id="keyEmail" placeholder="留空则自动读取" maxlength="120" class="styled-admin-input">
+              </div>
+            </div>
+            <div class="admin-field flex-2">
+              <label class="field-title" for="keyToken">NovelAI Persistent Token (PST)</label>
+              <div class="admin-input-wrap">
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-key"/></svg>
+                <input id="keyToken" placeholder="pst-…" class="styled-admin-input mono" required>
+                <button type="button" id="keyPasteBtn" class="admin-inner-btn" title="粘贴剪贴板内容"><svg class="ico" aria-hidden="true"><use href="#i-copy"/></svg>粘贴</button>
+              </div>
+            </div>
+          </div>
+          <div class="key-add-actions">
+            <button type="button" id="keyAddCancel" class="btn ghost-btn small">取消</button>
+            <button type="submit" id="keyAdd" class="btn primary small"><svg class="ico" aria-hidden="true"><use href="#i-check"/></svg><span>验证并添加</span></button>
+          </div>
+        </form>
+
+        <div id="keysList" class="key-grid"></div>
       </div>
 
       <!-- Tab 2: 用户 -->
