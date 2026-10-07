@@ -11,7 +11,7 @@
  *   GET  /api/me           当前用户信息
  *   POST /api/generate     生图（普通用户锁死 Opus 免费层级）
  *   GET  /api/models       模型/采样器/尺寸预设/UC 预设等元数据
- *   GET  /api/anlas        查询密钥池 Anlas 余额与订阅
+ *   GET  /api/anlas        密钥池概况（?cached=1 读库秒开，?refresh=1 强制实时查询）
  *   GET  /api/history      我的生成历史
  *   GET  /img/:file        取生成图（含属主校验）
  *   ── 插件 API（管理员 Token）──
@@ -316,7 +316,7 @@ function refreshKeySubscription(key) {
   if (now - (subRefreshAt.get(key.id) || 0) < SUB_REFRESH_MIN_INTERVAL_MS) return;
   subRefreshAt.set(key.id, now);
   new NaiClient(key.token).getSubscription({ withInfo: false })
-    .then(sub => qKeys.setState(key.id, 'ok', sub.tier, sub.anlas, sub.v5Battery))
+    .then(sub => qKeys.saveSubscription(key.id, sub))
     .catch(() => {});
 }
 
@@ -626,7 +626,7 @@ async function handleAdmittedGenerate(req, res, user, preBody) {
 /* ─── Anlas 汇总查询 ───────────────────────────────────── */
 
 let anlasRefreshPromise = null;
-let anlasCache = { expiresAt: 0, data: null };
+let anlasCache = { expiresAt: 0, errors: {}, at: null };
 async function mapWithConcurrency(items, limit, worker) {
   const results = new Array(items.length);
   let nextIndex = 0;
@@ -640,40 +640,93 @@ async function mapWithConcurrency(items, limit, worker) {
   return results;
 }
 
-async function handleAnlas(res) {
-  if (anlasCache.data && Date.now() < anlasCache.expiresAt) return ok(res, anlasCache.data);
-  if (!anlasRefreshPromise) {
-    anlasRefreshPromise = (async () => {
-      const keys = qKeys.list().filter(k => k.is_active);
-      const detail = await mapWithConcurrency(keys, 4, async (k) => {
-        try {
-          const raw = qKeys.get(k.id);
-          if (!raw) return { id: k.id, label: k.label, tier: '-', anlas: null, error: '密钥已删除', active: false };
-          const sub = await new NaiClient(raw.token).getSubscription();
-          qKeys.setState(k.id, 'ok', sub.tier, sub.anlas, sub.v5Battery);
-          if (sub.email) qKeys.setEmail(k.id, sub.email);
-          return {
-            id: k.id, label: k.label, email: k.email || sub.email || null,
-            tier: sub.tierName, anlas: sub.anlas, active: true,
-            expiresAt: sub.expiresAt, v5Battery: sub.v5Battery,
-            v5TimeUntilNext: sub.v5TimeUntilNext,
-            freeGeneration: sub.freeGeneration, freeLimits: sub.freeLimits,
-          };
-        } catch (error) {
-          // 查询接口不再停用密钥；状态变更只由显式验证或生成鉴权失败触发。
-          return { id: k.id, label: k.label, tier: '-', anlas: null, error: '查询失败', active: false };
-        }
-      });
-      const data = {
-        totalAnlas: detail.reduce((sum, item) => sum + (Number(item.anlas) || 0), 0),
-        activeCount: keys.length,
-        keys: detail,
-      };
-      anlasCache = { expiresAt: Date.now() + 30000, data };
-      return data;
-    })().finally(() => { anlasRefreshPromise = null; });
+/* ─── 提示词片段校验 ─────────────────────────────────────── */
+const PROMPT_KINDS = ['painter', 'action', 'uc', 'character', 'main'];
+const PROMPT_LIMIT = 500;
+
+/** 校验片段字段；partial=true 时只校验出现的字段（用于修改） */
+function validatePromptInput(b, { partial = false } = {}) {
+  if (!b || typeof b !== 'object') return { error: '请求格式错误' };
+  const value = {};
+  if (!partial || b.kind !== undefined) {
+    if (!PROMPT_KINDS.includes(b.kind)) return { error: 'kind 参数无效' };
+    value.kind = b.kind;
   }
-  return ok(res, await anlasRefreshPromise);
+  if (!partial || b.title !== undefined) {
+    if (typeof b.title !== 'string' || !b.title.trim()) return { error: '标题必填' };
+    if (b.title.length > 200) return { error: '标题长度不能超过 200 字符' };
+    value.title = b.title.trim();
+  }
+  if (!partial || b.content !== undefined) {
+    if (typeof b.content !== 'string') return { error: '内容必填' };
+    if (b.content.length > 5000) return { error: '内容长度不能超过 5000 字符' };
+    value.content = b.content;
+  }
+  if (b.sort !== undefined) {
+    if (!Number.isInteger(b.sort) || Math.abs(b.sort) > 1e9) return { error: '排序值必须为整数' };
+    value.sort = b.sort;
+  }
+  return { value };
+}
+
+/* ─── 密钥池概况 ─────────────────────────────────────────── */
+const LOW_BATTERY = 5; // 与 qKeys.listCandidates 的低电量保护阈值一致
+
+/** 只读数据库的密钥池快照（不请求上游）：密钥列表、汇总，以及下一张免费图会优先使用的节点 */
+function poolSnapshot() {
+  const items = qKeys.list();
+  const active = items.filter((k) => k.is_active);
+  const healthy = active.filter((k) => !String(k.verify_state || '').startsWith('invalid'));
+  const opus = healthy.filter((k) => k.tier === 3);
+  const batteries = opus.map((k) => k.v5_battery).filter((v) => typeof v === 'number');
+  return {
+    items,
+    summary: {
+      total: items.length,
+      active: active.length,
+      healthy: healthy.length,
+      opus: opus.length,
+      freeReady: opus.filter((k) => (k.v5_battery ?? 100) > LOW_BATTERY).length,
+      totalAnlas: healthy.reduce((sum, k) => sum + (Number(k.anlas) || 0), 0),
+      avgBattery: batteries.length ? Math.round(batteries.reduce((a, b) => a + b, 0) / batteries.length) : null,
+    },
+    nextFreeKeyId: qKeys.listCandidates(0)[0]?.id ?? null,
+  };
+}
+
+/** 向上游实时查询所有启用中密钥的订阅；查询失败不停用密钥（状态变更只由显式验证或生成鉴权失败触发） */
+async function refreshPool() {
+  const errors = {};
+  await mapWithConcurrency(qKeys.list().filter((k) => k.is_active), 4, async (k) => {
+    const raw = qKeys.get(k.id);
+    if (!raw) return;
+    try {
+      const sub = await new NaiClient(raw.token).getSubscription();
+      qKeys.saveSubscription(k.id, sub);
+      if (sub.email) qKeys.setEmail(k.id, sub.email);
+    } catch (error) {
+      errors[k.id] = String(error.message || error).slice(0, 80);
+    }
+  });
+  anlasCache = { expiresAt: Date.now() + 30000, errors, at: new Date().toISOString() };
+}
+
+/**
+ * GET /api/anlas
+ *   ?cached=1  直接返回数据库中的上次结果（秒开，用于先渲染）
+ *   ?refresh=1 跳过 30 秒缓存强制实时查询
+ */
+async function handleAnlas(res, { cached = false, force = false } = {}) {
+  if (!cached && (force || Date.now() >= anlasCache.expiresAt)) {
+    if (!anlasRefreshPromise) anlasRefreshPromise = refreshPool().finally(() => { anlasRefreshPromise = null; });
+    await anlasRefreshPromise;
+  }
+  return ok(res, {
+    ...poolSnapshot(),
+    live: !cached,
+    errors: cached ? {} : anlasCache.errors,
+    refreshedAt: anlasCache.at,
+  });
 }
 /* ─── 路由 ─────────────────────────────────────────────── */
 
@@ -837,7 +890,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/anlas' && req.method === 'GET') {
       const admin = await requireAdmin(req, res);
       if (!admin) return;
-      return handleAnlas(res);
+      return handleAnlas(res, { cached: url.searchParams.get('cached') === '1', force: url.searchParams.get('refresh') === '1' });
     }
 
     if (p === '/api/generate' && req.method === 'POST') {
@@ -946,43 +999,37 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/prompts' && req.method === 'GET') {
       if (!user) return fail(res, 401, '未登录');
       const kind = url.searchParams.get('kind');
-      const VALID_KINDS = ['painter', 'action', 'uc', 'character', 'main'];
-      if (!kind || !VALID_KINDS.includes(kind)) {
-        return fail(res, 400, 'kind 参数无效');
-      }
-      const items = qPrompts.listByUserAndKind(user.user_id, kind);
-      return ok(res, { items });
+      // 不带 kind 时一次返回全部分类（片段库弹窗打开时只拉一次，切换分类不再请求）
+      if (!kind) return ok(res, { items: qPrompts.listByUser(user.user_id), limit: PROMPT_LIMIT });
+      if (!PROMPT_KINDS.includes(kind)) return fail(res, 400, 'kind 参数无效');
+      return ok(res, { items: qPrompts.listByUserAndKind(user.user_id, kind) });
     }
 
     if (p === '/api/prompts' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
-      const { kind, title, content, sort } = await readJson(req, 64 * 1024);
-      const VALID_KINDS = ['painter', 'action', 'uc', 'character', 'main'];
-      if (!kind || !VALID_KINDS.includes(kind)) {
-        return fail(res, 400, 'kind 参数无效');
-      }
-      if (typeof title !== 'string' || !title.trim()) {
-        return fail(res, 400, '标题必填');
-      }
-      if (title.length > 200) {
-        return fail(res, 400, '标题长度不能超过 200 字符');
-      }
-      if (typeof content !== 'string') {
-        return fail(res, 400, '内容必填');
-      }
-      if (content.length > 5000) {
-        return fail(res, 400, '内容长度不能超过 5000 字符');
-      }
-      if (qPrompts.countByUser(user.user_id) >= 500) return fail(res, 409, '提示词片段已达 500 条上限，请先整理');
-      const sortVal = typeof sort === 'number' && Number.isInteger(sort) ? sort : 0;
-      const id = qPrompts.insert({
-        user_id: user.user_id,
-        kind,
-        title: title.trim(),
-        content,
-        sort: sortVal,
-      });
+      const b = await readJson(req, 64 * 1024);
+      const v = validatePromptInput(b);
+      if (v.error) return fail(res, 400, v.error);
+      if (qPrompts.countByUser(user.user_id) >= PROMPT_LIMIT) return fail(res, 409, `提示词片段已达 ${PROMPT_LIMIT} 条上限，请先整理`);
+      const id = qPrompts.insert({ user_id: user.user_id, ...v.value, sort: v.value.sort ?? 0 });
       return ok(res, { id });
+    }
+
+    if (p === '/api/prompts/import' && req.method === 'POST') {
+      if (!user) return fail(res, 401, '未登录');
+      const b = await readJson(req, 4 * 1024 * 1024);
+      const list = Array.isArray(b) ? b : b?.items;
+      if (!Array.isArray(list) || !list.length) return fail(res, 400, '没有可导入的片段');
+      if (list.length > PROMPT_LIMIT) return fail(res, 400, `单次最多导入 ${PROMPT_LIMIT} 条`);
+      const items = [];
+      for (let i = 0; i < list.length; i++) {
+        const v = validatePromptInput(list[i]);
+        if (v.error) return fail(res, 400, `第 ${i + 1} 条：${v.error}`);
+        items.push(v.value);
+      }
+      const r = qPrompts.importMany(user.user_id, items, PROMPT_LIMIT);
+      if (!r.ok) return fail(res, 409, `超出 ${PROMPT_LIMIT} 条上限：需新增 ${r.needed} 条，剩余空间 ${r.room} 条`);
+      return ok(res, { added: r.added, skipped: r.skipped });
     }
 
     let promptMatch;
@@ -993,24 +1040,10 @@ const server = http.createServer(async (req, res) => {
       if (!rec) return fail(res, 404, '记录不存在');
       if (rec.user_id !== user.user_id) return fail(res, 403, '无权修改');
 
-      const b = await readJson(req, 64 * 1024);
-      const updates = {};
-      if (b.title !== undefined) {
-        if (typeof b.title !== 'string' || !b.title.trim()) return fail(res, 400, '标题不能为空');
-        if (b.title.length > 200) return fail(res, 400, '标题长度不能超过 200 字符');
-        updates.title = b.title.trim();
-      }
-      if (b.content !== undefined) {
-        if (typeof b.content !== 'string') return fail(res, 400, '内容格式错误');
-        if (b.content.length > 5000) return fail(res, 400, '内容长度不能超过 5000 字符');
-        updates.content = b.content;
-      }
-      if (b.sort !== undefined) {
-        if (typeof b.sort !== 'number' || !Number.isInteger(b.sort)) return fail(res, 400, '排序值必须为整数');
-        updates.sort = b.sort;
-      }
-
-      qPrompts.update(id, user.user_id, updates);
+      const v = validatePromptInput(await readJson(req, 64 * 1024), { partial: true });
+      if (v.error) return fail(res, 400, v.error);
+      delete v.value.kind; // 分类不可修改（角色片段的内容格式与其他分类不同）
+      qPrompts.update(id, user.user_id, v.value);
       return ok(res, {});
     }
 
@@ -1163,7 +1196,7 @@ const server = http.createServer(async (req, res) => {
         return ok(res, { moved });
       }
 
-      if (p === '/api/admin/keys' && req.method === 'GET') return ok(res, { items: qKeys.list() });
+      if (p === '/api/admin/keys' && req.method === 'GET') return ok(res, poolSnapshot());
       if (p === '/api/admin/keys' && req.method === 'POST') {
         const { label, token, email } = await readJson(req, 64 * 1024);
         if (!token || !/^pst-[A-Za-z0-9_-]{20,}$/.test(token)) return fail(res, 400, 'PST 格式不正确（应以 pst- 开头）');
@@ -1173,7 +1206,7 @@ const server = http.createServer(async (req, res) => {
         const effectiveEmail = email || verify.subscription?.email || (label && label.includes('@') ? label : null);
         if (effectiveEmail) qKeys.setEmail(id, effectiveEmail);
         if (verify.ok) {
-          qKeys.setState(id, 'ok', verify.subscription.tier, verify.subscription.anlas, verify.subscription.v5Battery);
+          qKeys.saveSubscription(id, verify.subscription);
         } else {
           qKeys.setState(id, `invalid:${verify.error}`, null, null);
           qKeys.setActive(id, false);
@@ -1194,7 +1227,7 @@ const server = http.createServer(async (req, res) => {
         if (b.action === 'verify') {
           const verify = await new NaiClient(k.token).verifyToken();
           if (verify.ok) {
-            qKeys.setState(id, 'ok', verify.subscription.tier, verify.subscription.anlas, verify.subscription.v5Battery);
+            qKeys.saveSubscription(id, verify.subscription);
             if (verify.subscription.email) qKeys.setEmail(id, verify.subscription.email);
             qKeys.setActive(id, true);
           } else {
@@ -1261,7 +1294,7 @@ const server = http.createServer(async (req, res) => {
           if (!raw) return null;
           const verify = await new NaiClient(raw.token).verifyToken();
           if (verify.ok) {
-            qKeys.setState(k.id, 'ok', verify.subscription.tier, verify.subscription.anlas, verify.subscription.v5Battery);
+            qKeys.saveSubscription(k.id, verify.subscription);
             if (verify.subscription.email) qKeys.setEmail(k.id, verify.subscription.email);
             qKeys.setActive(k.id, true);
           } else {

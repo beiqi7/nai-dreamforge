@@ -18,10 +18,14 @@
   - 高电量优先，同一 key 互斥排队
   - 遇到 429 先退避重试，仍失败则冷却 30 秒
   - 失效的 key 自动停用，并切换到下一个
+  - 概况面板：可用节点、全池 Anlas、V5 平均充能、可免费出图节点数；每个 key 的充能条、订阅到期提醒，并标出下一张免费图会派给哪个 key
 - **用户等级**：管理员可自定义等级（分辨率、步数、张数、图生图/重绘权限、出图频率、每月 Anlas 额度），也能给单个用户单独设额度
 - **画廊**：缩略图、无限滚动、收藏、批量下载 ZIP / 批量删除
 - **读取参数**：从 NovelAI 生成的图片里读出元数据，回填到表单
 - **提示词片段库**：画师串、动作、UC、角色、主串五类，按用户保存
+  - 点卡片即插入；跨分类搜索并高亮，回车插入第一条
+  - 动作串、角色按「分组 | 名称」自动分组；支持置顶、行内新建与编辑
+  - 一键导出 / 导入 JSON（重复条目自动跳过），方便备份或在账号间迁移
 - **漫画分镜工作室**（管理员）：固定角色，逐镜头生成连续画面
 - **插件 API**：兼容官方 `/ai/generate-image` 协议，可接入柏宝绘（SillyTavern）
 - **安全**：scrypt 密码哈希、HttpOnly 会话、CSP；登录按账号和 IP 双重限速；图片只有本人或管理员能看
@@ -241,6 +245,7 @@ test/                冒烟测试
   - `tier`：3 表示 Opus
   - `trainingStepsLeft.fixedTrainingStepsLeft + purchasedTrainingSteps`：即 Anlas 余额
   - `usage.percent`：V5 电量
+  - `expiresAt`：订阅到期时间（Unix 秒）
 - **V5 模型**：`nai-diffusion-5-full` / `nai-diffusion-5-curated`（以及 `-inpainting`）
   - 使用 `params_version: 4`，以及 `ucPresetId`、`qualityPresetId`、`tag_hint_qt`、`tag_hint_uc_preset`、`straight_alpha`、`image_format`
   - 不再发送 `sm`、`sm_dyn`、`qualityToggle`、`skip_cfg_above_sigma`；不支持 Vibe Transfer / ControlNet
