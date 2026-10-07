@@ -18,7 +18,7 @@ ADMIN_USER=admin ADMIN_PASS='请替换为高强度密码' node server.js
 
 | 功能 | 管理员 | 普通用户 |
 |---|---|---|
-| 模型 | 全部（V5/V4.5/V4/V3 + inpainting 权重） | 全部 t2i 模型 |
+| 模型 | 全部（V5 / V4.5 + inpainting 权重） | 全部 t2i 模型 |
 | 尺寸 | ≤1536（任意） | **≤1024×1024 总像素** |
 | 步数 | ≤50 | **≤28** |
 | 张数 | 1–8（第 2 张起计 Anlas） | **仅 1 张** |
@@ -55,6 +55,8 @@ lib/db.js            SQLite：users / nai_keys / generations / sessions
 lib/policy.js        角色权限策略（管理员默认免费层可越界；普通用户硬锁免费层）
 lib/auth.js          Cookie 会话鉴权
 lib/scheduler.js     Key 互斥、等待队列、429 退避与租约释放
+lib/nai-compat.js    官方 /ai/generate-image 请求体 → 本站请求映射（插件兼容）
+lib/zip.js           STORED ZIP 打包（插件返回 / 画廊批量流式下载）
 public/              前端（原生 HTML/CSS/JS，暗夜主题 + inpaint 画布工作台）
 scripts/             双云备份、空闲分类备份与 systemd 配置
 test/security-smoke.js 安全回归冒烟测试
