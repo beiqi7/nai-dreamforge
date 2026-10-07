@@ -38,6 +38,7 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 
@@ -85,10 +86,35 @@ function writeHead(res, code, headers = {}) {
   }
   res.writeHead(code, { ...SECURITY_HEADERS, ...cors, ...headers });
 }
+/** 按 Accept-Encoding 选压缩算法（br 优先） */
+function pickEncoding(req) {
+  const accept = String(req?.headers['accept-encoding'] || '');
+  if (/\bbr\b/.test(accept)) return 'br';
+  if (/\bgzip\b/.test(accept)) return 'gzip';
+  return null;
+}
+
+// 小响应压缩不划算；大响应（历史列表、插件 base64 图）放线程池异步压缩，不阻塞事件循环。
+const JSON_COMPRESS_MIN_BYTES = 2048;
 const json = (res, code, obj) => {
-  const body = JSON.stringify(obj);
-  writeHead(res, code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(body);
+  const body = Buffer.from(JSON.stringify(obj));
+  const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+  const enc = body.length >= JSON_COMPRESS_MIN_BYTES ? pickEncoding(res.req) : null;
+  if (!enc) {
+    writeHead(res, code, headers);
+    return res.end(body);
+  }
+  const done = (error, out) => {
+    if (res.headersSent || res.destroyed) return;
+    if (error) {
+      writeHead(res, code, headers);
+      return res.end(body);
+    }
+    writeHead(res, code, { ...headers, 'Content-Encoding': enc, 'Vary': 'Accept-Encoding', 'Content-Length': out.length });
+    res.end(out);
+  };
+  if (enc === 'br') zlib.brotliCompress(body, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }, done);
+  else zlib.gzip(body, { level: 6 }, done);
 };
 const ok = (res, obj) => json(res, 200, { ok: true, ...obj });
 const fail = (res, code, error) => json(res, code, { ok: false, error });
@@ -112,6 +138,65 @@ function serveFile(req, res, file, type, immutable = false) {
     stream.on('error', () => res.destroy());
     stream.pipe(res);
   });
+}
+
+/* ─── 前端静态资源：预压缩 + 内容哈希 URL ─────────────────
+ * index.html 中的 /app.js、/style.css 被改写为带 ?v=<哈希> 的地址，命中当前哈希时可永久缓存；
+ * 每次请求比对文件 size/mtime，改了前端文件无需重启即可生效。 */
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const STATIC_TYPES = {
+  'index.html': 'text/html; charset=utf-8',
+  'app.js': 'application/javascript; charset=utf-8',
+  'style.css': 'text/css; charset=utf-8',
+};
+let staticBundle = null;
+
+function buildStaticAsset(raw, type) {
+  return {
+    type,
+    hash: crypto.createHash('sha256').update(raw).digest('hex').slice(0, 12),
+    identity: raw,
+    gzip: zlib.gzipSync(raw, { level: 9 }),
+    br: zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } }),
+  };
+}
+
+function loadStaticBundle() {
+  const stamp = Object.keys(STATIC_TYPES).map((name) => {
+    const st = fs.statSync(path.join(PUBLIC_DIR, name));
+    return `${name}:${st.size}:${st.mtimeMs}`;
+  }).join('|');
+  if (staticBundle?.stamp === stamp) return staticBundle;
+  const assets = {};
+  for (const name of ['app.js', 'style.css']) {
+    assets[name] = buildStaticAsset(fs.readFileSync(path.join(PUBLIC_DIR, name)), STATIC_TYPES[name]);
+  }
+  const html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
+    .replace('href="/style.css"', `href="/style.css?v=${assets['style.css'].hash}"`)
+    .replace('src="/app.js"', `src="/app.js?v=${assets['app.js'].hash}"`);
+  assets['index.html'] = buildStaticAsset(Buffer.from(html), STATIC_TYPES['index.html']);
+  staticBundle = { stamp, assets };
+  return staticBundle;
+}
+
+function serveStatic(req, res, name, version) {
+  const asset = loadStaticBundle().assets[name];
+  const immutable = name !== 'index.html' && version === asset.hash;
+  const etag = `W/"${asset.hash}"`;
+  const headers = {
+    'Content-Type': asset.type,
+    'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+    'ETag': etag,
+    'Vary': 'Accept-Encoding',
+  };
+  if (req.headers['if-none-match'] === etag) {
+    writeHead(res, 304, headers);
+    return res.end();
+  }
+  const enc = pickEncoding(req);
+  const body = enc ? asset[enc] : asset.identity;
+  writeHead(res, 200, { ...headers, ...(enc ? { 'Content-Encoding': enc } : {}), 'Content-Length': body.length });
+  res.end(body);
 }
 
 async function removeGeneratedFile(file) {
@@ -595,9 +680,8 @@ const server = http.createServer(async (req, res) => {
 
 
     /* 静态 */
-    if (req.method === 'GET' && p === '/') return serveFile(req, res, path.join(__dirname, 'public', 'index.html'), 'text/html; charset=utf-8');
-    if (req.method === 'GET' && p === '/style.css') return serveFile(req, res, path.join(__dirname, 'public', 'style.css'), 'text/css; charset=utf-8');
-    if (req.method === 'GET' && p === '/app.js') return serveFile(req, res, path.join(__dirname, 'public', 'app.js'), 'application/javascript; charset=utf-8');
+    if (req.method === 'GET' && p === '/') return serveStatic(req, res, 'index.html');
+    if (req.method === 'GET' && (p === '/style.css' || p === '/app.js')) return serveStatic(req, res, p.slice(1), url.searchParams.get('v'));
 
     /* 图片（属主或管理员可见） */
     if (req.method === 'GET' && p.startsWith('/img/')) {
@@ -1108,6 +1192,8 @@ function shutdown(signal) {
 }
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 process.once('SIGINT', () => shutdown('SIGINT'));
+
+loadStaticBundle(); // 启动时预压缩，首个访客无需等待
 
 server.listen(PORT, HOST, () => {
   console.log(`[nai-site] http://${HOST}:${PORT}  (SQLite: ${process.env.NAI_DB || path.join(__dirname, 'data', 'nai.sqlite')})`);

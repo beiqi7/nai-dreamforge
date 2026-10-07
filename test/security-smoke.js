@@ -382,6 +382,26 @@ async function testHttpSecurity() {
     assert.equal(models.response.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(models.response.headers.get('x-frame-options'), 'DENY');
 
+    // 静态资源：预压缩 + 内容哈希 URL；带当前哈希时可永久缓存
+    const index = await fetch(`http://127.0.0.1:${PORT}/`, { headers: { 'accept-encoding': 'br' } });
+    assert.equal(index.headers.get('content-encoding'), 'br');
+    assert.equal(index.headers.get('cache-control'), 'no-cache');
+    const html = await index.text();
+    const jsVersion = html.match(/src="\/app\.js\?v=([a-f0-9]{12})"/)?.[1];
+    assert.ok(jsVersion, 'index.html should reference hashed app.js');
+    assert.match(html, /href="\/style\.css\?v=[a-f0-9]{12}"/);
+    const appJs = await fetch(`http://127.0.0.1:${PORT}/app.js?v=${jsVersion}`, { headers: { 'accept-encoding': 'gzip' } });
+    assert.equal(appJs.headers.get('content-encoding'), 'gzip');
+    assert.match(appJs.headers.get('cache-control'), /immutable/);
+    assert.equal(await appJs.text(), fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8'));
+    const staleJs = await fetch(`http://127.0.0.1:${PORT}/app.js?v=000000000000`);
+    assert.equal(staleJs.headers.get('cache-control'), 'no-cache');
+    const notModified = await fetch(`http://127.0.0.1:${PORT}/app.js`, { headers: { 'if-none-match': appJs.headers.get('etag') } });
+    assert.equal(notModified.status, 304);
+    const modelsGz = await fetch(`http://127.0.0.1:${PORT}/api/models`, { headers: { 'accept-encoding': 'gzip' } });
+    assert.equal(modelsGz.headers.get('content-encoding'), 'gzip');
+    assert.ok((await modelsGz.json()).models);
+
     const health = await request('/api/health');
     assert.equal(health.response.status, 200);
     assert.equal(health.body.ok, true);
