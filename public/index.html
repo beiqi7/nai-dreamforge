@@ -8,11 +8,48 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<svg class="icon-sprite" aria-hidden="true" width="0" height="0">
+  <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 3v4M21 5h-4M5 17v3M6.5 18.5h-3"/></symbol>
+  <symbol id="i-brush" viewBox="0 0 24 24"><path d="M18.37 2.63 14 7l-1.59-1.59a2 2 0 0 0-2.82 0L8 7l9 9 1.59-1.59a2 2 0 0 0 0-2.82L17 10l4.37-4.37a2.12 2.12 0 1 0-3-3Z"/><path d="M9 8c-2 3-4 3.5-7 4l8 10c2-1 6-5 6-7"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></symbol>
+  <symbol id="i-images" viewBox="0 0 24 24"><path d="M18 22H4a2 2 0 0 1-2-2V6"/><path d="m22 13-1.3-1.3a2.4 2.4 0 0 0-3.4 0L11 18"/><circle cx="12" cy="8" r="2"/><rect x="6" y="2" width="16" height="16" rx="2"/></symbol>
+  <symbol id="i-gem" viewBox="0 0 24 24"><path d="M6 3h12l4 6-10 13L2 9Z"/><path d="M11 3 8 9l4 13 4-13-3-6"/><path d="M2 9h20"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="2.2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10M7 8h6M7 16h8"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-dice" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8.5 8.5h.01M15.5 8.5h.01M12 12h.01M8.5 15.5h.01M15.5 15.5h.01"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-crown" viewBox="0 0 24 24"><path d="m2 6 4 11h12l4-11-6 5-4-7-4 7-6-5z"/><path d="M6 21h12"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.65-.75 1.65-1.69 0-.44-.18-.84-.44-1.13-.29-.29-.44-.65-.44-1.13a1.64 1.64 0 0 1 1.67-1.67h2c3.05 0 5.55-2.5 5.55-5.55C21.97 6.01 17.46 2 12 2z"/><path d="M13.5 6.5h.01M17.5 10.5h.01M8.5 7.5h.01M6.5 12.5h.01"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9V3z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><path d="M7.5 7.5h.01"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+</svg>
 
 <!-- 1. 登录 -->
 <div id="authView" class="auth-wrap hidden">
   <div class="auth-ambient"></div>
   <div class="auth-box">
+    <div class="auth-logo"><svg class="ico" aria-hidden="true"><use href="#i-sparkles"/></svg></div>
     <div class="auth-title">NovelAI Web Studio</div>
     <div class="auth-sub">基于 NovelAI API 的生图平台</div>
 
@@ -20,7 +57,7 @@
       <div class="form-group">
         <label>用户名</label>
         <div class="input-wrap">
-          <span class="input-icon">👤</span>
+          <svg class="ico input-icon" aria-hidden="true"><use href="#i-user"/></svg>
           <input id="loginUser" placeholder="输入用户名" autocomplete="username" required autofocus>
         </div>
       </div>
@@ -28,7 +65,7 @@
       <div class="form-group">
         <label>密码</label>
         <div class="input-wrap">
-          <span class="input-icon">🔑</span>
+          <svg class="ico input-icon" aria-hidden="true"><use href="#i-lock"/></svg>
           <input id="loginPass" type="password" placeholder="输入访问密码" autocomplete="current-password" required>
         </div>
       </div>
@@ -52,6 +89,7 @@
   <!-- 顶栏导航 -->
   <header class="navbar">
     <div class="nav-brand">
+      <span class="brand-mark"><svg class="ico" aria-hidden="true"><use href="#i-sparkles"/></svg></span>
       <span class="nav-title">NovelAI Studio</span>
       <span class="nav-tag">V5</span>
     </div>
@@ -59,33 +97,34 @@
     <div class="nav-actions">
       <!-- 单独画廊视图入口 -->
       <button id="galleryNavBtn" class="pill-btn gallery-chip" title="切换到专属画廊视图">
-        <span class="chip-icon">🖼️</span>
+        <svg class="ico chip-icon" aria-hidden="true"><use href="#i-images"/></svg>
         <span id="galleryNavTxt">作品画廊</span>
       </button>
 
       <button id="anlasBtn" class="pill-btn anlas-chip" title="查看当前密钥池 Anlas 余额">
-        <span class="chip-icon">💎</span>
+        <svg class="ico chip-icon" aria-hidden="true"><use href="#i-gem"/></svg>
         <span id="anlasBadge">查询额度</span>
       </button>
       <!-- 管理员专属：分镜连环画工作室入口 -->
       <button id="comicStudioNavBtn" class="pill-btn comic-chip hidden" title="连续分镜与漫画剧情工作室">
-        <span class="chip-icon">🎬</span>
+        <svg class="ico chip-icon" aria-hidden="true"><use href="#i-film"/></svg>
         <span>漫画工作室</span>
       </button>
 
       <!-- 管理员专属入口 -->
       <button id="adminOpenBtn" class="pill-btn admin-chip hidden" title="管理后台">
-        <span class="chip-icon">⚙️</span>
+        <svg class="ico chip-icon" aria-hidden="true"><use href="#i-shield"/></svg>
         <span>管理后台</span>
       </button>
       <!-- 个人设置入口（可改名与改密） -->
-      <button id="userProfileBtn" class="pill-btn user-chip" title="点击修改用户名与密码">
-        <span class="chip-icon">👤</span>
+      <span class="nav-divider" aria-hidden="true"></span>
+      <button id="userProfileBtn" class="user-chip" title="账号设置：修改用户名与密码">
+        <span id="userAvatar" class="avatar-dot">?</span>
         <span id="userBadge" class="user-txt"></span>
-        <span class="chip-edit">✏️</span>
+        <span id="userTierPill" class="user-tier-pill"></span>
       </button>
 
-      <button id="logoutBtn" class="btn ghost-btn nav-logout">退出</button>
+      <button id="logoutBtn" class="nav-icon-btn nav-logout" title="退出登录"><svg class="ico" aria-hidden="true"><use href="#i-logout"/></svg><span>退出</span></button>
     </div>
   </header>
 
@@ -98,17 +137,17 @@
         <div class="mode-tabs-wrap">
           <div class="mode-tabs">
             <button type="button" class="mode-tab active" data-mode="txt2img">
-              <span class="mode-icon">✨</span>
+              <svg class="ico mode-icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
               <span class="mode-label-full">文生图</span>
               <span class="mode-label-short">文生</span>
             </button>
             <button type="button" class="mode-tab" data-mode="inpaint" id="modeTabInpaint">
-              <span class="mode-icon">🖌</span>
+              <svg class="ico mode-icon" aria-hidden="true"><use href="#i-brush"/></svg>
               <span class="mode-label-full">局部重绘 (Inpaint)</span>
               <span class="mode-label-short">重绘</span>
             </button>
             <button type="button" class="mode-tab" data-mode="img2img" id="modeTabImg2img">
-              <span class="mode-icon">🖼</span>
+              <svg class="ico mode-icon" aria-hidden="true"><use href="#i-image"/></svg>
               <span class="mode-label-full">图生图</span>
               <span class="mode-label-short">图生</span>
             </button>
@@ -118,14 +157,14 @@
         <!-- 2. 重绘专属图片上传/涂抹区（切到 Inpaint 时醒目展开！） -->
         <div id="inpaintWorkspace" class="card inpaint-card hidden">
           <div class="card-title-bar">
-            <span class="sec-title"><span class="title-icon">🖌</span> 重绘原图与蒙版</span>
+            <span class="sec-title"><svg class="ico title-icon" aria-hidden="true"><use href="#i-brush"/></svg> 重绘原图与蒙版</span>
             <button type="button" id="ipClearBtn" class="btn ghost-btn tiny">清空蒙版</button>
           </div>
 
           <!-- 拖拽/点击上传大框 -->
           <div id="ipDropzone" class="dropzone">
             <div class="dropzone-inner">
-              <span class="drop-icon">📤</span>
+              <svg class="ico drop-icon" aria-hidden="true"><use href="#i-upload"/></svg>
               <div class="drop-text">点击选择或拖拽上传原图</div>
               <div class="drop-sub">也支持直接 Ctrl+V 粘贴截图 · 自动缩放至推荐尺寸</div>
             </div>
@@ -159,12 +198,12 @@
         <!-- 3. 图生图专属上传区 -->
         <div id="img2imgWorkspace" class="card inpaint-card hidden">
           <div class="card-title-bar">
-            <span class="sec-title"><span class="title-icon">🖼</span> 图生图原图</span>
+            <span class="sec-title"><svg class="ico title-icon" aria-hidden="true"><use href="#i-image"/></svg> 图生图原图</span>
             <button type="button" id="i2iRemoveBtn" class="btn ghost-btn tiny">移除</button>
           </div>
           <div id="i2iDropzone" class="dropzone">
             <div class="dropzone-inner">
-              <span class="drop-icon">📁</span>
+              <svg class="ico drop-icon" aria-hidden="true"><use href="#i-upload"/></svg>
               <div class="drop-text">点击或拖入原图</div>
               <div class="drop-sub">支持 Ctrl+V 粘贴 · 影响整体构图与色彩</div>
             </div>
@@ -186,13 +225,13 @@
         <div class="card prompt-box">
           <div class="card-title-bar">
             <label for="promptInp" class="sec-title">
-              <span class="title-icon">✨</span> 提示词 (Prompt)
+              <svg class="ico title-icon" aria-hidden="true"><use href="#i-sparkles"/></svg> 提示词<span class="sec-en">Prompt</span>
             </label>
             <div class="prompt-head-actions">
               <span id="promptCharCount" class="title-tip" style="font-family:var(--font-mono);font-size:11px;">0 字符</span>
               <button type="button" id="formatPromptBtn" class="btn ghost-btn tiny" title="整理逗号与多余空格">整理</button>
               <button type="button" id="clearPromptBtn" class="btn ghost-btn tiny" title="清空提示词">清空</button>
-              <button type="button" id="promptLibBtn" class="btn ghost-btn tiny lib-open-btn" title="常用词库">📚 片段库</button>
+              <button type="button" id="promptLibBtn" class="btn ghost-btn tiny lib-open-btn" title="常用词库"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg>片段库</button>
             </div>
           </div>
 
@@ -210,9 +249,9 @@
           <div class="card-title-bar sub-bar">
             <div class="sec-title-sm-wrap">
               <label for="ucInp" class="sec-title-sm">
-                <span class="title-icon">🚫</span> 排除元素 (Negative)
+                <svg class="ico title-icon" aria-hidden="true"><use href="#i-ban"/></svg> 排除元素<span class="sec-en">Negative</span>
               </label>
-              <button type="button" id="ucLibBtn" class="btn ghost-btn tiny lib-open-btn" title="从片段库插入 UC 片段">📚</button>
+              <button type="button" id="ucLibBtn" class="btn ghost-btn tiny lib-open-btn" title="从片段库插入 UC 片段"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg></button>
             </div>
             <div class="uc-preset-wrap">
               <select id="ucPresetSel">
@@ -227,11 +266,11 @@
         <!-- 独立角色提示词 (Character Prompts) -->
         <div class="card char-box">
           <div class="card-title-bar">
-            <span class="sec-title"><span class="title-icon">👥</span> 独立角色 (Character Prompts)</span>
+            <span class="sec-title"><svg class="ico title-icon" aria-hidden="true"><use href="#i-users"/></svg> 独立角色<span class="sec-en">Characters</span></span>
             <div class="char-head-right">
               <span id="charCountTag" class="char-count hidden">0/22</span>
-              <button type="button" id="charFromLibBtn" class="btn ghost-btn tiny" title="从片段库选择并导入角色">📚 从库中选</button>
-              <button type="button" id="charAddBtn" class="btn ghost-btn tiny">＋ 添加角色</button>
+              <button type="button" id="charFromLibBtn" class="btn ghost-btn tiny" title="从片段库选择并导入角色"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg>从库中选</button>
+              <button type="button" id="charAddBtn" class="btn ghost-btn tiny"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>添加角色</button>
             </div>
           </div>
           <div class="char-tip">独立编写每个角色的提示词并指定在画面的位置（最多支持 22 个角色）。</div>
@@ -242,7 +281,7 @@
         <!-- 读图学习：解析 NovelAI PNG meta -->
         <div class="card meta-learn-card fold-card collapsed" id="metaLearnCard">
           <div class="card-title-bar fold-head" id="metaLearnHead">
-            <span class="sec-title"><span class="title-icon">🧬</span> 读取图片参数<span class="lib-fold-hint">（点击展开）</span></span>
+            <span class="sec-title"><svg class="ico title-icon" aria-hidden="true"><use href="#i-scan"/></svg> 读取图片参数<span class="lib-fold-hint">（点击展开）</span></span>
             <span class="fold-right">
               <span id="metaLearnSummary" class="fold-summary">拖入 NAI PNG</span>
               <span class="lib-add-arrow">▼</span>
@@ -251,7 +290,7 @@
           <div id="metaLearnBody" class="fold-body">
             <div id="metaDrop" class="dropzone meta-drop">
               <div class="dropzone-inner">
-                <span class="drop-icon">📥</span>
+                <svg class="ico drop-icon" aria-hidden="true"><use href="#i-upload"/></svg>
                 <div class="drop-text">拖入或粘贴 NovelAI PNG 图片读取参数</div>
                 <div class="drop-sub">请用原 PNG（本站「下载原图」），截图或另存为会丢掉 meta</div>
               </div>
@@ -279,7 +318,7 @@
         <!-- 卡片一：画幅与步进（默认可折叠，防误触步数） -->
         <div class="card settings-box fold-card collapsed" id="sizeStepsCard">
           <div class="card-title-bar fold-head" id="sizeStepsHead">
-            <span class="sec-title"><span class="title-icon">🎛</span> 尺寸与步数<span class="lib-fold-hint">（点击展开）</span></span>
+            <span class="sec-title"><svg class="ico title-icon" aria-hidden="true"><use href="#i-sliders"/></svg> 尺寸与步数<span class="lib-fold-hint">（点击展开）</span></span>
             <span class="fold-right">
               <span id="sizeStepsSummary" class="fold-summary">832×1216 · 28步 · CFG 5</span>
               <span class="lib-add-arrow" id="sizeStepsArrow">▼</span>
@@ -346,7 +385,7 @@
 
         <!-- 卡片二：高级控制 -->
         <div class="card settings-box">
-          <div class="sec-title"><span class="title-icon">⚙️</span> 高级设置</div>
+          <div class="sec-title"><svg class="ico title-icon" aria-hidden="true"><use href="#i-settings"/></svg> 高级设置</div>
 
           <div class="field-item">
             <label class="field-label">采样算法</label>
@@ -389,20 +428,33 @@
       <!-- 6. 状态与生成按钮吸底固定 -->
       <div class="action-footer">
         <div class="action-status-row">
-          <span id="anlasHint" class="cost-tag">💎 预计 0 Anlas</span>
-          <span id="tierBadge" class="tier-tag free hidden">🆓 Opus 免费层</span>
+          <span id="anlasHint" class="cost-tag">预计 0 Anlas</span>
+          <span id="tierBadge" class="tier-tag free hidden">免费 · 0 Anlas</span>
         </div>
 
         <button id="genBtn" class="btn primary exec-btn glow">
-          <span class="btn-icon">✨</span>
+          <svg class="ico btn-icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
           <span class="btn-main-text">生成图片</span>
         </button>
 
         <div id="genStatus" class="console-status"></div>
 
-        <div id="userLockNote" class="lock-tip hidden">
-          <span class="lock-ico">🔒</span>
-          <span>普通用户配额：单张/≤28步/免费，限速 6张/分 · 66张/时 · 240张/天</span>
+        <div id="quotaPanel" class="quota-panel hidden">
+          <div class="quota-head">
+            <span class="quota-tier"><svg class="ico" aria-hidden="true"><use href="#i-crown"/></svg><b id="quotaTierName">普通用户</b></span>
+            <span id="quotaRate" class="quota-rate"></span>
+          </div>
+          <div class="quota-row">
+            <span class="quota-label">24 小时出图</span>
+            <span class="quota-bar"><i id="quotaDayBar"></i></span>
+            <span id="quotaDayTxt" class="quota-num">0 / 0</span>
+          </div>
+          <div class="quota-row hidden" id="quotaAnlasRow">
+            <span class="quota-label">本月 Anlas</span>
+            <span class="quota-bar anlas"><i id="quotaAnlasBar"></i></span>
+            <span id="quotaAnlasTxt" class="quota-num">0 / 0</span>
+          </div>
+          <div id="quotaCaps" class="quota-caps"></div>
         </div>
       </div>
     </aside>
@@ -414,11 +466,9 @@
         <div class="canvas-frame" id="imgWrap">
           <div class="scanning-bar hidden" id="scanBar"></div>
           <div class="canvas-empty" id="placeholder">
-            <div class="cosmic-ring">
-              <div class="cosmic-star"></div>
-            </div>
-            <div class="empty-title">暂无图片</div>
-            <div class="empty-desc">在左侧输入提示词后点击生成</div>
+            <div class="empty-art"><svg class="ico" aria-hidden="true"><use href="#i-image"/></svg></div>
+            <div class="empty-title">还没有作品</div>
+            <div class="empty-desc">在左侧写下提示词，点击「生成图片」，作品会显示在这里</div>
           </div>
           <img id="resultImg" class="hidden clickable-img" alt="生成结果" title="点击放大查看原图">
           <div id="resultNav" class="result-nav hidden">
@@ -431,12 +481,12 @@
         <!-- 动作操作条 -->
         <div class="canvas-toolbar hidden" id="imgBar">
           <div class="action-btn-group">
-            <button id="dlBtn" class="btn ghost-btn">⬇ 下载原图</button>
-            <button id="copyPromptDirectBtn" class="btn ghost-btn">📋 复制提示词</button>
-            <button id="seedBtn" class="btn ghost-btn">🎲 复用种子</button>
-            <button id="reuseAllBtn" class="btn ghost-btn">⚙️ 复用全部参数</button>
-            <button id="sendToI2iBtn" class="btn ghost-btn hidden">🖼 送入图生图</button>
-            <button id="inpaintBtn" class="btn action-pill-btn hidden">🖌 重绘此图</button>
+            <button id="dlBtn" class="btn ghost-btn"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg>下载原图</button>
+            <button id="copyPromptDirectBtn" class="btn ghost-btn"><svg class="ico" aria-hidden="true"><use href="#i-copy"/></svg>复制提示词</button>
+            <button id="seedBtn" class="btn ghost-btn"><svg class="ico" aria-hidden="true"><use href="#i-dice"/></svg>复用种子</button>
+            <button id="reuseAllBtn" class="btn ghost-btn"><svg class="ico" aria-hidden="true"><use href="#i-repeat"/></svg>复用全部参数</button>
+            <button id="sendToI2iBtn" class="btn ghost-btn hidden"><svg class="ico" aria-hidden="true"><use href="#i-image"/></svg>送入图生图</button>
+            <button id="inpaintBtn" class="btn action-pill-btn hidden"><svg class="ico" aria-hidden="true"><use href="#i-brush"/></svg>重绘此图</button>
           </div>
           <div id="metaInfo" class="meta-data-tag"></div>
         </div>
@@ -448,9 +498,9 @@
       <section class="gallery-card">
         <div class="gallery-header">
           <div class="sec-title">
-            <span class="title-icon">🎞</span> 历史画廊
+            <svg class="ico title-icon" aria-hidden="true"><use href="#i-clock"/></svg> 历史画廊
           </div>
-          <button id="histRefresh" class="btn ghost-btn tiny">🔄 刷新记录</button>
+          <button id="histRefresh" class="btn ghost-btn tiny"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
         </div>
         <div id="histGrid" class="gallery-grid"></div>
       </section>
@@ -462,7 +512,7 @@
     <div class="gallery-view-header">
       <div class="gallery-view-title-box">
         <div class="gallery-main-title">
-          <span class="title-icon">🖼️</span>
+          <svg class="ico title-icon" aria-hidden="true"><use href="#i-images"/></svg>
           <span>我的个人作品画廊</span>
         </div>
         <div class="gallery-sub-title">支持多选管理、批量收藏标记、批量删除以及打包下载 ZIP</div>
@@ -518,14 +568,14 @@
       <!-- 左侧：全局锁定参数基底配置 -->
       <aside class="comic-sidebar">
         <div class="comic-sidebar-header">
-          <span class="comic-title"><span class="title-icon">🔒</span> 剧情固定基底 (Global Locks)</span>
+          <span class="comic-title"><svg class="ico title-icon" aria-hidden="true"><use href="#i-lock"/></svg> 剧情固定基底 (Global Locks)</span>
           <button type="button" id="comicPullCurrentBtn" class="btn ghost-btn tiny" title="从主生图界面拉取当前配置">从主页导入</button>
         </div>
 
         <!-- 1. 画风与基础修饰词 (锁定) -->
         <div class="card comic-card">
           <div class="card-title-bar">
-            <label class="sec-title-sm"><span class="title-icon">🎨</span> 固定画风 / 环境词 (Style Prompt)</label>
+            <label class="sec-title-sm"><svg class="ico title-icon" aria-hidden="true"><use href="#i-palette"/></svg> 固定画风 / 环境词 (Style Prompt)</label>
             <button type="button" id="comicStyleLibBtn" class="btn ghost-btn tiny">📚 选画风</button>
           </div>
           <textarea id="comicStylePrompt" rows="3" class="styled-admin-input" placeholder="例如：masterpiece, anime screencap, 2026 official art, sunset lighting, classroom ambient..."></textarea>
@@ -535,7 +585,7 @@
         <!-- 2. 多角色独立锁定体系 (Multi-Characters) -->
         <div class="card comic-card">
           <div class="card-title-bar">
-            <label class="sec-title-sm"><span class="title-icon">👥</span> 出场角色列表 (Characters)</label>
+            <label class="sec-title-sm"><svg class="ico title-icon" aria-hidden="true"><use href="#i-users"/></svg> 出场角色列表 (Characters)</label>
             <div class="comic-char-actions">
               <button type="button" id="comicCharLibBtn" class="btn ghost-btn tiny">📚 从库导入</button>
               <button type="button" id="comicAddCharBtn" class="btn ghost-btn tiny">＋ 加角色</button>
@@ -547,7 +597,7 @@
         <!-- 3. 固定排除词 (UC) -->
         <div class="card comic-card">
           <div class="card-title-bar">
-            <label class="sec-title-sm"><span class="title-icon">🚫</span> 全局排除元素 (Negative / UC)</label>
+            <label class="sec-title-sm"><svg class="ico title-icon" aria-hidden="true"><use href="#i-ban"/></svg> 全局排除元素 (Negative / UC)</label>
           </div>
           <textarea id="comicUc" rows="2" class="styled-admin-input" placeholder="lowres, bad quality, jpeg artifacts, bad hands, blurry..."></textarea>
         </div>
@@ -555,7 +605,7 @@
         <!-- 4. 固定硬件生成参数 (尺寸/种子/步数) -->
         <div class="card comic-card">
           <div class="card-title-bar">
-            <label class="sec-title-sm"><span class="title-icon">⚙️</span> 生成模型与尺寸</label>
+            <label class="sec-title-sm"><svg class="ico title-icon" aria-hidden="true"><use href="#i-settings"/></svg> 生成模型与尺寸</label>
           </div>
           <div class="comic-param-grid">
             <div class="comic-field">
@@ -597,7 +647,7 @@
             <span id="comicCostEstimate" class="comic-cost-tag">预计免费 (0 Anlas)</span>
           </div>
           <button type="button" id="comicRunBatchBtn" class="btn primary exec-btn glow">
-            <span class="btn-icon">▶</span>
+            <svg class="ico btn-icon" aria-hidden="true"><use href="#i-play"/></svg>
             <span id="comicRunBtnText">连续批量生成分镜剧情</span>
           </button>
           <div id="comicStatusTxt" class="comic-status-banner hidden"></div>
@@ -608,7 +658,7 @@
       <main class="comic-stage">
         <div class="comic-stage-toolbar">
           <div class="comic-stage-title">
-            <span class="title-icon">🎬</span>
+            <svg class="ico title-icon" aria-hidden="true"><use href="#i-film"/></svg>
             <span>剧情分镜板 (Story Panels)</span>
             <span class="comic-stage-sub">每个分镜只替换当前镜头的主提示词（动作、视角、表情），固定种子与画风保持人物连贯</span>
           </div>
@@ -674,7 +724,7 @@
   <div id="profileModal" class="modal-backdrop hidden">
     <div class="modal-window profile-window">
       <div class="modal-title-row">
-        <h3>👤 个人设置</h3>
+        <h3><svg class="ico" aria-hidden="true"><use href="#i-user"/></svg> 个人设置</h3>
         <button id="profileCloseBtn" class="btn icon-btn">✕</button>
       </div>
       <form id="profileForm" class="modal-form">
@@ -726,7 +776,7 @@
       <div class="admin-card lib-add-card" id="libAddCard">
         <div class="admin-card-head lib-add-card-head" id="libAddCardHead">
           <div class="card-caption">
-            <span class="caption-icon">➕</span>
+            <svg class="ico caption-icon" aria-hidden="true"><use href="#i-plus"/></svg>
             <span class="caption-title" id="libFormTitle">添加新片段</span><span class="lib-fold-hint">（点击折叠/展开）</span>
           </div>
           <div class="lib-add-head-right">
@@ -813,18 +863,19 @@
     <div class="modal-window admin-window">
       <div class="modal-title-row">
         <div class="admin-top-title">
-          <span class="admin-crown">⚙️</span>
+          <svg class="ico admin-crown" aria-hidden="true"><use href="#i-shield"/></svg>
           <span>管理后台</span>
         </div>
         <div class="admin-top-actions">
-          <button id="adminTestAllBtn" class="btn primary small glow">⚡ 测试全部密钥有效性</button>
-          <button id="adminCloseBtn" class="btn ghost-btn small">✕ 关闭</button>
+          <button id="adminTestAllBtn" class="btn primary small glow"><svg class="ico" aria-hidden="true"><use href="#i-zap"/></svg><span>测试全部密钥</span></button>
+          <button id="adminCloseBtn" class="btn ghost-btn small"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg>关闭</button>
         </div>
       </div>
 
       <div class="admin-tab-nav">
         <button data-tab="keys" class="nav-tab active">PST 密钥池</button>
         <button data-tab="users" class="nav-tab">用户管理</button>
+        <button data-tab="tiers" class="nav-tab">用户等级</button>
         <button data-tab="gens" class="nav-tab">全站生成记录</button>
         <button data-tab="stats" class="nav-tab">用量统计</button>
         <button data-tab="plugin" class="nav-tab">插件 API</button>
@@ -835,7 +886,7 @@
         <div class="admin-card">
           <div class="admin-card-head">
             <div class="card-caption">
-              <span class="caption-icon">➕</span>
+              <svg class="ico caption-icon" aria-hidden="true"><use href="#i-plus"/></svg>
               <span class="caption-title">添加 PST 密钥</span>
             </div>
             <span class="caption-tip">添加后自动验证有效性并同步订阅等级与 Anlas 余额</span>
@@ -844,21 +895,21 @@
             <div class="admin-field flex-1">
               <label class="field-title">备注标签</label>
               <div class="admin-input-wrap">
-                <span class="admin-input-ico">🏷️</span>
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-tag"/></svg>
                 <input id="keyLabel" placeholder="例如：主号 / 备用号" class="styled-admin-input">
               </div>
             </div>
             <div class="admin-field flex-1">
               <label class="field-title">对应绑定邮箱 (选填)</label>
               <div class="admin-input-wrap">
-                <span class="admin-input-ico">📧</span>
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-mail"/></svg>
                 <input id="keyEmail" placeholder="例如：user@gmail.com" class="styled-admin-input">
               </div>
             </div>
             <div class="admin-field flex-2">
               <label class="field-title">NovelAI Persistent Token (PST)</label>
               <div class="admin-input-wrap">
-                <span class="admin-input-ico">🔑</span>
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-key"/></svg>
                 <input id="keyToken" placeholder="以 pst- 开头的完整持久密钥字符串" class="styled-admin-input mono">
                 <button type="button" id="keyPasteBtn" class="admin-inner-btn" title="粘贴剪贴板内容">📋 粘贴</button>
               </div>
@@ -889,7 +940,7 @@
         <div class="admin-card">
           <div class="admin-card-head">
             <div class="card-caption">
-              <span class="caption-icon">👤</span>
+              <svg class="ico caption-icon" aria-hidden="true"><use href="#i-user"/></svg>
               <span class="caption-title">创建新用户</span>
             </div>
             <span class="caption-tip">为不同用户分配独立账号与权限</span>
@@ -898,14 +949,14 @@
             <div class="admin-field flex-1">
               <label class="field-title">用户名</label>
               <div class="admin-input-wrap">
-                <span class="admin-input-ico">👤</span>
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-user"/></svg>
                 <input id="newUserName" placeholder="2-20 位中英数字" class="styled-admin-input">
               </div>
             </div>
             <div class="admin-field flex-1">
               <label class="field-title">初始密码</label>
               <div class="admin-input-wrap">
-                <span class="admin-input-ico">🔒</span>
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-lock"/></svg>
                 <input id="newUserPass" type="password" placeholder="至少 8 位密码" class="styled-admin-input">
               </div>
             </div>
@@ -913,9 +964,15 @@
               <label class="field-title">权限角色</label>
               <div class="admin-select-wrap">
                 <select id="newUserRole" class="styled-admin-select">
-                  <option value="user">普通用户 (仅 Opus 免费规格)</option>
-                  <option value="admin">管理员 (无限制)</option>
+                  <option value="user">普通用户（受等级约束）</option>
+                  <option value="admin">管理员（无限制）</option>
                 </select>
+              </div>
+            </div>
+            <div class="admin-field flex-1">
+              <label class="field-title">用户等级</label>
+              <div class="admin-select-wrap">
+                <select id="newUserTier" class="styled-admin-select"></select>
               </div>
             </div>
             <div class="admin-field-action">
@@ -931,12 +988,24 @@
           <table class="data-table" id="usersTbl">
             <thead>
               <tr>
-                <th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>配额状态 (1分 / 1时 / 24小时 / 累计)</th><th>创建时间</th><th>操作</th>
+                <th>用户</th><th>等级</th><th>状态</th><th>用量</th><th>单人额度</th><th>操作</th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
+      </div>
+
+      <!-- Tab: 用户等级 -->
+      <div id="tab-tiers" class="tab-pane hidden">
+        <div class="tiers-intro">
+          <div>
+            <div class="tiers-intro-title"><svg class="ico" aria-hidden="true"><use href="#i-layers"/></svg>用户等级</div>
+            <p>等级只约束普通用户，管理员不受限制。修改后立即对该等级下的所有用户生效；单个用户还可以在「用户管理」里单独设置每日额度。</p>
+          </div>
+          <button id="tierAddBtn" type="button" class="btn primary small"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>新建等级</button>
+        </div>
+        <div id="tiersList" class="tiers-list"></div>
       </div>
 
       <!-- Tab 3: 日志 -->
@@ -989,7 +1058,7 @@
         <div class="admin-card plugin-guide-card">
           <div class="admin-card-head">
             <div class="card-caption">
-              <span class="caption-icon">⚡</span>
+              <svg class="ico caption-icon" aria-hidden="true"><use href="#i-zap"/></svg>
               <span class="caption-title">3 步完成柏宝绘配置</span>
             </div>
             <span class="caption-tip">即配即用，开箱自动识别</span>
@@ -1033,7 +1102,7 @@
         <div class="admin-card plugin-issuer-card">
           <div class="admin-card-head">
             <div class="card-caption">
-              <span class="caption-icon">🔑</span>
+              <svg class="ico caption-icon" aria-hidden="true"><use href="#i-key"/></svg>
               <span class="caption-title">签发专属 API Token</span>
             </div>
             <span class="caption-tip">令牌仅在生成时完整展示一次，请妥善保存</span>
@@ -1042,7 +1111,7 @@
             <div class="admin-field flex-2">
               <label class="field-title">客户端名称 / 备注标签</label>
               <div class="admin-input-wrap">
-                <span class="admin-input-ico">🏷️</span>
+                <svg class="ico admin-input-ico" aria-hidden="true"><use href="#i-tag"/></svg>
                 <input id="pluginTokenLabel" placeholder="例如：我的酒馆-台式机" class="styled-admin-input">
               </div>
             </div>
@@ -1070,7 +1139,7 @@
         <div class="admin-card plugin-endpoints-card">
           <div class="admin-card-head">
             <div class="card-caption">
-              <span class="caption-icon">🌐</span>
+              <svg class="ico caption-icon" aria-hidden="true"><use href="#i-globe"/></svg>
               <span class="caption-title">端点矩阵与兼容性概览</span>
             </div>
             <span class="caption-tip">支持官方二进制流与自定义自动化平台</span>
