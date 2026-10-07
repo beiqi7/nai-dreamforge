@@ -2,15 +2,22 @@
 
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
+const http = require('node:http');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { applyPolicy } = require('../lib/policy');
 const { MODELS, extractZipEntries } = require('../lib/nai');
 const scheduler = require('../lib/scheduler');
-const { crc32, zipStore } = require('../lib/zip');
+const { crc32, crc32Table, zipStore, zipStoreChunks } = require('../lib/zip');
 const { officialToSiteRequest, fakeOpusSubscription } = require('../lib/nai-compat');
 
 const ROOT = path.join(__dirname, '..');
 const PORT = 18761;
+const UPSTREAM_PORT = 18762;
+const TEST_IMG_DIR = path.join(os.tmpdir(), `nai-smoke-${process.pid}`);
+const FAKE_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), crypto.randomBytes(256)]);
 
 /* ─── 工具 ─────────────────────────────────────────────── */
 
@@ -75,6 +82,19 @@ function testZipAndCompat() {
   assert.equal(mapped.body.ucPreset, 'none');
   assert.equal(mapped.body.charPrompts[0].prompt, 'long hair');
   assert.equal(fakeOpusSubscription().tier, 3);
+}
+
+async function testZipStreaming() {
+  const blob = crypto.randomBytes(100003);
+  assert.equal(crc32Table(blob), crc32(blob));
+  const files = [
+    { name: 'a.png', data: FAKE_PNG },
+    { name: '中文.png', data: Buffer.concat([FAKE_PNG, Buffer.from('tail')]) },
+  ];
+  const chunks = [];
+  for await (const chunk of zipStoreChunks(files)) chunks.push(chunk);
+  assert.deepEqual(Buffer.concat(chunks), zipStore(files));
+  assert.equal(extractZipEntries(Buffer.concat(chunks)).length, 2);
 }
 /* ─── 策略层单元测试 ───────────────────────────────────── */
 
@@ -154,6 +174,10 @@ function testPolicyInputValidation() {
   // 非对象请求体
   const notObj = applyPolicy('user', 'string');
   assert.equal(notObj.ok, false);
+
+  // 未知采样器/噪声调度在策略层即 400，而不是租到 key 后才失败
+  assert.equal(applyPolicy('user', { ...base, sampler: 'ddim_v3' }).code, 'sampler');
+  assert.equal(applyPolicy('user', { ...base, noiseSchedule: 'bogus' }).code, 'noiseSchedule');
 }
 
 function testPolicyAdminCapabilities() {
@@ -287,6 +311,38 @@ async function testCooldownWakesQueue() {
 
 /* ─── HTTP 集成安全测试 ─────────────────────────────────── */
 
+/** 假 NovelAI 上游：订阅查询 + 生图（返回含 n_samples 张 PNG 的 ZIP），记录收到的 payload */
+function startFakeUpstream() {
+  const received = [];
+  const server = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/user/subscription') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        tier: 3, active: true, expiresAt: 0, perks: {},
+        trainingStepsLeft: { fixedTrainingStepsLeft: 1000, purchasedTrainingSteps: 0 },
+        usage: { percent: 80 },
+      }));
+    }
+    if (req.method === 'GET' && req.url === '/user/information') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ plainTextEmail: 'fake@example.com' }));
+    }
+    if (req.method === 'POST' && req.url === '/ai/generate-image') {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      received.push(payload);
+      const n = payload.parameters?.n_samples || 1;
+      const zip = zipStore(Array.from({ length: n }, (_, i) => ({ name: `image_${i}.png`, data: FAKE_PNG })));
+      res.writeHead(200, { 'content-type': 'application/zip', 'content-length': zip.length });
+      return res.end(zip);
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  return new Promise(resolve => server.listen(UPSTREAM_PORT, '127.0.0.1', () => resolve({ server, received })));
+}
+
 async function startServer() {
   const child = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
@@ -298,6 +354,8 @@ async function startServer() {
       ADMIN_USER: 'auditadmin',
       ADMIN_PASS: 'AuditPassword123',
       COOKIE_SECURE: '0',
+      NAI_IMAGE_BASE: `http://127.0.0.1:${UPSTREAM_PORT}`,
+      NAI_IMG_DIR: TEST_IMG_DIR,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -308,6 +366,7 @@ async function startServer() {
 }
 
 async function testHttpSecurity() {
+  const upstream = await startFakeUpstream();
   const { child, stderr } = await startServer();
   try {
     await waitForServer(child);
@@ -466,18 +525,25 @@ async function testHttpSecurity() {
     });
     assert.equal(bigReq.response.status, 413);
 
+    // 畸形会话 Cookie 不应让登出 500
+    const badCookieLogout = await request('/api/auth/logout', { method: 'POST', headers: { cookie: 'nai_session=%E0%A4%A' } });
+    assert.equal(badCookieLogout.response.status, 200);
+
     console.log('  [http-security] 基础 HTTP 安全测试通过');
     await testAdminProtection(child, adminHeaders, admin.cookie, admin2Id);
     await testProfileUpdate(child, admin.cookie, normalHeaders, normal.cookie);
     await testPromptLibraryAuth(child, normalHeaders, adminHeaders, admin.cookie);
     await testImageAccessControl(child, normal.cookie, admin.cookie);
     await testGalleryBatchAuth(child, normalHeaders);
+    await testGenerateFlow(adminHeaders, normalHeaders, upstream);
   } finally {
     child.kill('SIGTERM');
     await new Promise(resolve => {
       child.once('exit', resolve);
       setTimeout(resolve, 2000).unref();
     });
+    upstream.server.close();
+    fs.rmSync(TEST_IMG_DIR, { recursive: true, force: true });
   }
   const errText = stderr();
   if (errText && !/ExperimentalWarning/.test(errText)) throw new Error(errText);
@@ -550,6 +616,18 @@ async function testProfileUpdate(child, adminCookie, normalHeaders, normalCookie
   const relogin = await login('normaluser', 'NewNormalPass123');
   assert.equal(relogin.response.status, 200);
   const newHeaders = jsonHeaders(relogin.cookie);
+
+  // 非字符串字段应 400，而非类型错误导致 500
+  const numericPass = await request('/api/user/profile', {
+    method: 'POST', headers: newHeaders,
+    body: JSON.stringify({ newPassword: 123456789, oldPassword: 'NewNormalPass123' }),
+  });
+  assert.equal(numericPass.response.status, 400);
+  const numericName = await request('/api/user/profile', {
+    method: 'POST', headers: newHeaders,
+    body: JSON.stringify({ newUsername: 12345 }),
+  });
+  assert.equal(numericName.response.status, 400);
 
   // 修改用户名为已占用名
   const dupName = await request('/api/user/profile', {
@@ -639,7 +717,61 @@ async function testGalleryBatchAuth(child, normalHeaders) {
   });
   assert.equal(emptyDl.response.status, 400);
 
+  const tooMany = await request('/api/history/batch-download', {
+    method: 'POST', headers: normalHeaders, body: JSON.stringify({ ids: Array.from({ length: 501 }, (_, i) => i + 1) })
+  });
+  assert.equal(tooMany.response.status, 400);
+
   console.log('  [gallery-batch] 画廊批量操作鉴权测试通过');
+}
+
+async function testGenerateFlow(adminHeaders, normalHeaders, upstream) {
+  const addKey = await request('/api/admin/keys', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ label: 'fake', token: `pst-${'a'.repeat(32)}` }),
+  });
+  assert.equal(addKey.response.status, 200);
+  assert.equal(addKey.body.verify.ok, true);
+
+  // 普通用户未指定种子：响应中的种子须与实际发给上游的一致，并被写进历史
+  const gen = await request('/api/generate', {
+    method: 'POST', headers: normalHeaders,
+    body: JSON.stringify({ prompt: '1girl, solo', model: T2I_MODEL, width: 832, height: 1216, steps: 28 }),
+  });
+  assert.equal(gen.response.status, 200, JSON.stringify(gen.body));
+  const sentSeed = upstream.received.at(-1).parameters.seed;
+  assert.ok(Number.isInteger(sentSeed));
+  assert.equal(gen.body.seed, sentSeed);
+
+  const hist = await request('/api/history?limit=10', { headers: normalHeaders });
+  assert.equal(hist.response.status, 200);
+  const rec = hist.body.items.find(it => it.id === gen.body.gen_id);
+  assert.ok(rec);
+  assert.equal(rec.seed, sentSeed);
+
+  const img = await fetch(`http://127.0.0.1:${PORT}${gen.body.image}`, { headers: normalHeaders });
+  assert.equal(img.status, 200);
+  assert.deepEqual(Buffer.from(await img.arrayBuffer()), FAKE_PNG);
+
+  // 流式批量下载：返回合法 ZIP，内容与原图一致，文件名带 id
+  const dl = await fetch(`http://127.0.0.1:${PORT}/api/history/batch-download`, {
+    method: 'POST', headers: normalHeaders, body: JSON.stringify({ ids: [rec.id, rec.id, 999999] }),
+  });
+  assert.equal(dl.status, 200);
+  assert.equal(dl.headers.get('content-type'), 'application/zip');
+  const zipBuf = Buffer.from(await dl.arrayBuffer());
+  const pngs = extractZipEntries(zipBuf);
+  assert.equal(pngs.length, 1);
+  assert.deepEqual(pngs[0], FAKE_PNG);
+  assert.ok(zipBuf.includes(Buffer.from(`nai-${sentSeed}-${rec.id}.png`)));
+
+  const del = await request('/api/history/batch-delete', {
+    method: 'POST', headers: normalHeaders, body: JSON.stringify({ ids: [rec.id] }),
+  });
+  assert.equal(del.response.status, 200);
+  assert.equal(del.body.deleted, 1);
+
+  console.log('  [generate-flow] 生图/历史/批量下载链路测试通过');
 }
 async function testImageAccessControl(child, normalCookie, adminCookie) {
   // 无会话访问图片 → 404
@@ -666,6 +798,7 @@ async function testImageAccessControl(child, normalCookie, adminCookie) {
   testPolicyInputValidation();
   testPolicyAdminCapabilities();
   testZipAndCompat();
+  await testZipStreaming();
 
   console.log('Running scheduler tests...');
   await testLeaseRelease();

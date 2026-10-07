@@ -38,13 +38,15 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 
 const { NaiClient, MODELS, SAMPLERS, NOISE_SCHEDULES, SIZE_PRESETS, UC_PRESETS, OPUS_FREE, calcAnlas, randomSeed } = require('./lib/nai');
 const { db, qUsers, qSessions, qKeys, qGens, qPrompts, qApiTokens, ensureAdmin, verifyPassword, verifyLoginPassword, isUniqueViolation } = require('./lib/db');
 const { applyPolicy } = require('./lib/policy');
 const { getSessionUser, getSessionToken, getRequestUser, getBearerToken, sessionCookie, clearSessionCookie, readJson } = require('./lib/auth');
 const { scheduleGenerate } = require('./lib/scheduler');
-const { zipStore } = require('./lib/zip');
+const { zipStore, zipStoreChunks } = require('./lib/zip');
 const { officialToSiteRequest, fakeOpusSubscription } = require('./lib/nai-compat');
 
 const PORT = Number(process.env.PORT || 7860);
@@ -144,6 +146,14 @@ function parseLimit(value, fallback, max) {
   return Math.max(1, Math.min(max, parsed));
 }
 
+// 与画廊单次最多载入条数一致；同时避免超出 SQLite 绑定变量上限与超大 ZIP。
+const MAX_BATCH_IDS = 500;
+function parseIdList(ids) {
+  if (!Array.isArray(ids) || !ids.length) return { error: 'ids 不能为空' };
+  if (ids.length > MAX_BATCH_IDS) return { error: `单次最多操作 ${MAX_BATCH_IDS} 项` };
+  return { ids: [...new Set(ids.map(Number).filter(n => Number.isInteger(n) && n > 0))] };
+}
+
 async function requireAdmin(req, res) {
   const u = getSessionUser(req);
   if (!u) { fail(res, 401, '请先登录'); return null; }
@@ -191,6 +201,18 @@ async function sendGenerateOk(res, user, payload, urls) {
   return ok(res, { ...payload, image: b64[0] || null, images: b64, url: urls[0], urls });
 }
 
+const SUB_REFRESH_MIN_INTERVAL_MS = 60 * 1000;
+const subRefreshAt = new Map();
+/** 生图后刷新该 key 的电量/Anlas；同一 key 每分钟最多一次，避免每张图都多打上游接口 */
+function refreshKeySubscription(key) {
+  const now = Date.now();
+  if (now - (subRefreshAt.get(key.id) || 0) < SUB_REFRESH_MIN_INTERVAL_MS) return;
+  subRefreshAt.set(key.id, now);
+  new NaiClient(key.token).getSubscription({ withInfo: false })
+    .then(sub => qKeys.setState(key.id, 'ok', sub.tier, sub.anlas, sub.v5Battery))
+    .catch(() => {});
+}
+
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_PER_ACCOUNT = 5;
 const LOGIN_MAX_PER_IP = 20;
@@ -204,7 +226,7 @@ const pluginGenHits = new Map();
 
 function clientIp(req) {
   const remote = req.socket.remoteAddress || '';
-  const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === ':ffff:127.0.0.1';
+  const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
   if (isLocal) {
     const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
     if (forwarded) return forwarded.slice(0, 128);
@@ -354,11 +376,7 @@ async function handleAdmittedGenerate(req, res, user, preBody) {
     }
     qKeys.markUsed(key.id);
     // 若是 V5 模型，后台异步轻量拉取该 key 最新剩余电量与 Anlas，不阻塞生图返回
-    if (payload.model?.startsWith('nai-diffusion-5')) {
-      new NaiClient(key.token).getSubscription()
-        .then(sub => qKeys.setState(key.id, 'ok', sub.tier, sub.anlas, sub.v5Battery))
-        .catch(() => {});
-    }
+    if (payload.model?.startsWith('nai-diffusion-5')) refreshKeySubscription(key);
     return sendGenerateOk(res, user, {
       image: urls[0],
       images: urls,
@@ -503,10 +521,9 @@ async function handleAnlas(res) {
       };
       anlasCache = { expiresAt: Date.now() + 30000, data };
       return data;
-    })();
+    })().finally(() => { anlasRefreshPromise = null; });
   }
-  try { return ok(res, await anlasRefreshPromise); }
-  finally { anlasRefreshPromise = null; }
+  return ok(res, await anlasRefreshPromise);
 }
 /* ─── 路由 ─────────────────────────────────────────────── */
 
@@ -592,7 +609,7 @@ const server = http.createServer(async (req, res) => {
         return fail(res, 429, '登录失败次数过多，请 15 分钟后重试');
       }
       const u = qUsers.byName(normalizedUsername);
-      const passwordValid = verifyLoginPassword(String(password || ''), u?.password_hash);
+      const passwordValid = await verifyLoginPassword(String(password || ''), u?.password_hash);
       if (!u || u.disabled || !passwordValid) {
         recordLoginFailure(failureKeys.account);
         recordLoginFailure(failureKeys.ip);
@@ -605,8 +622,8 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: true, username: u.username, role: u.role }));
     }
     if (p === '/api/auth/logout' && req.method === 'POST') {
-      const m = (req.headers.cookie || '').match(/nai_session=([^;]+)/);
-      if (m) qSessions.del(decodeURIComponent(m[1]));
+      const token = getSessionToken(req);
+      if (token) qSessions.del(token);
       writeHead(res, 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': clearSessionCookie() });
       return res.end(JSON.stringify({ ok: true }));
     }
@@ -628,6 +645,9 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/user/profile' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
       const { newUsername, newPassword, oldPassword } = await readJson(req, 8192);
+      if ((newPassword && typeof newPassword !== 'string') || (newUsername && typeof newUsername !== 'string')) {
+        return fail(res, 400, '参数格式错误');
+      }
       const cur = qUsers.byId(user.user_id);
       const fullCur = qUsers.byName(cur.username);
       if (newPassword) {
@@ -702,46 +722,52 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/history/batch-favorite' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
       const { ids, state } = await readJson(req, 64 * 1024);
-      if (!Array.isArray(ids) || !ids.length) return fail(res, 400, 'ids 不能为空');
-      const validIds = ids.map(Number).filter(n => Number.isInteger(n) && n > 0);
-      qGens.batchFavorite(validIds, user.user_id, state !== false);
-      return ok(res, { count: validIds.length });
+      const parsed = parseIdList(ids);
+      if (parsed.error) return fail(res, 400, parsed.error);
+      qGens.batchFavorite(parsed.ids, user.user_id, state !== false);
+      return ok(res, { count: parsed.ids.length });
     }
 
     if (p === '/api/history/batch-delete' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
-      const { ids } = await readJson(req, 64 * 1024);
-      if (!Array.isArray(ids) || !ids.length) return fail(res, 400, 'ids 不能为空');
-      const validIds = ids.map(Number).filter(n => Number.isInteger(n) && n > 0);
-      const { files, changes } = qGens.batchDelByUser(validIds, user.user_id);
+      const parsed = parseIdList((await readJson(req, 64 * 1024)).ids);
+      if (parsed.error) return fail(res, 400, parsed.error);
+      const { files, changes } = qGens.batchDelByUser(parsed.ids, user.user_id);
       await Promise.all(files.map(removeGeneratedFile));
       return ok(res, { deleted: changes });
     }
 
     if (p === '/api/history/batch-download' && req.method === 'POST') {
       if (!user) return fail(res, 401, '未登录');
-      const { ids } = await readJson(req, 64 * 1024);
-      if (!Array.isArray(ids) || !ids.length) return fail(res, 400, 'ids 不能为空');
-      const validIds = ids.map(Number).filter(n => Number.isInteger(n) && n > 0);
-      const items = qGens.getFilesByIds(validIds, user.user_id);
+      const parsed = parseIdList((await readJson(req, 64 * 1024)).ids);
+      if (parsed.error) return fail(res, 400, parsed.error);
+      const items = qGens.getFilesByIds(parsed.ids, user.user_id);
       if (!items.length) return fail(res, 404, '未找到可下载图片');
-      const files = [];
+      const present = [];
       for (const it of items) {
         const fname = path.basename(String(it.file));
-        if (!fname || fname.includes('/') || fname.includes('\\')) continue;
+        if (!fname || fname.includes('\\')) continue;
         try {
-          const buf = await fs.promises.readFile(path.join(IMG_DIR, fname));
-          files.push({ name: `nai-${it.seed || it.id}.png`, data: buf });
+          if ((await fs.promises.stat(path.join(IMG_DIR, fname))).isFile()) present.push({ ...it, fname });
         } catch {}
       }
-      if (!files.length) return fail(res, 404, '图片文件缺失');
-      const zip = zipStore(files);
+      if (!present.length) return fail(res, 404, '图片文件缺失');
+      // 逐张读取并流式写出，避免把几百张原图同时攒进内存；文件名带 id 防同种子重名。
+      async function* entries() {
+        for (const it of present) {
+          let data;
+          try { data = await fs.promises.readFile(path.join(IMG_DIR, it.fname)); } catch { continue; }
+          yield { name: it.seed != null ? `nai-${it.seed}-${it.id}.png` : `nai-${it.id}.png`, data };
+        }
+      }
       writeHead(res, 200, {
         'Content-Type': 'application/zip',
-        'Content-Length': zip.length,
+        'Cache-Control': 'no-store',
         'Content-Disposition': `attachment; filename="nai-batch-${Date.now()}.zip"`,
       });
-      return res.end(zip);
+      // 客户端中途断开时 pipeline 会拒绝；响应头已发出，只需丢弃连接。
+      await pipeline(Readable.from(zipStoreChunks(entries())), res).catch(() => res.destroy());
+      return;
     }
 
     if (p.startsWith('/api/history/') && req.method === 'DELETE') {
@@ -1022,11 +1048,10 @@ const server = http.createServer(async (req, res) => {
         return ok(res, { stats: { ...s, activeKeys: qKeys.count(), users: qUsers.count() } });
       }
       if (p === '/api/admin/keys/test-all' && req.method === 'POST') {
-        const list = qKeys.list();
-        const results = [];
-        for (const k of list) {
+        // 并发 4 路验证：串行时每个 key 最多数十秒，池子一大就会超时
+        const settled = await mapWithConcurrency(qKeys.list(), 4, async (k) => {
           const raw = qKeys.get(k.id);
-          if (!raw) continue;
+          if (!raw) return null;
           const verify = await new NaiClient(raw.token).verifyToken();
           if (verify.ok) {
             qKeys.setState(k.id, 'ok', verify.subscription.tier, verify.subscription.anlas, verify.subscription.v5Battery);
@@ -1036,9 +1061,9 @@ const server = http.createServer(async (req, res) => {
             qKeys.setState(k.id, `invalid:${verify.error}`, null, null);
             qKeys.setActive(k.id, false);
           }
-          results.push({ id: k.id, label: k.label, email: k.email || verify.subscription?.email, ok: verify.ok, anlas: verify.subscription?.anlas, v5Battery: verify.subscription?.v5Battery, tier: verify.subscription?.tierName, error: verify.error });
-        }
-        return ok(res, { results });
+          return { id: k.id, label: k.label, email: k.email || verify.subscription?.email, ok: verify.ok, anlas: verify.subscription?.anlas, v5Battery: verify.subscription?.v5Battery, tier: verify.subscription?.tierName, error: verify.error };
+        });
+        return ok(res, { results: settled.filter(Boolean) });
       }
       if (p.startsWith('/api/admin/generations/') && req.method === 'DELETE') {
         const gid = Number(p.slice(23));
