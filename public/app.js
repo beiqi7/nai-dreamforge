@@ -112,6 +112,7 @@ async function showMain() {
   bindProfileModal();
   bindPromptLibrary();
   bindLightbox();
+  bindHistoryGrid();
   loadHistory();
   bindViewNavigation();
   bindDedicatedGallery();
@@ -119,7 +120,6 @@ async function showMain() {
   if (ME.role === 'admin') {
     bindAdminModal();
     bindComicStudio();
-    loadAdminAll();
   }
 }
 
@@ -3108,23 +3108,16 @@ function bindPromptLibrary() {
 /* ═════════════════════════════════════════════════════════════
    历史作品画廊
    ═════════════════════════════════════════════════════════════ */
-async function loadHistory() {
-  try {
-    const j = await api('/api/history?limit=60');
-    const grid = $('histGrid');
-    grid.innerHTML = '';
-    if (!j.items.length) {
-      grid.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:12px;">暂无生成记录</div>';
-      return;
-    }
-    for (const it of j.items) {
-      const cell = document.createElement('div');
-      if (it.status === 'ok' && it.file) {
-        cell.className = 'hist-cell';
-        const chars = getRecordChars(it);
-        const badgeHtml = chars.length ? `<span class="hist-badge" title="${chars.length} 个独立角色">👤×${chars.length}</span>` : '';
-        const favBadge = it.is_favorited ? `<span class="hist-fav-badge" title="已收藏">❤️</span>` : '';
-        cell.innerHTML = `
+let historyById = new Map();
+
+function historyCellHtml(it) {
+  if (it.status !== 'ok' || !it.file) {
+    return `<div class="hist-cell failed">${esc(it.error ? `✗ ${it.error.slice(0, 50)}` : '✗ 失败')}</div>`;
+  }
+  const chars = getRecordChars(it);
+  const badgeHtml = chars.length ? `<span class="hist-badge" title="${chars.length} 个独立角色">👤×${chars.length}</span>` : '';
+  const favBadge = it.is_favorited ? `<span class="hist-fav-badge" title="已收藏">❤️</span>` : '';
+  return `<div class="hist-cell" data-id="${it.id}" title="${esc(`点击查看大图与参数\n${it.prompt}`)}">
           ${badgeHtml}
           ${favBadge}
           <img src="/thumb/${esc(it.file)}" loading="lazy" decoding="async">
@@ -3132,31 +3125,37 @@ async function loadHistory() {
             <button type="button" class="btn tiny ghost-btn hist-quick-reuse" title="复用参数">⚙️</button>
             <button type="button" class="btn tiny ghost-btn hist-quick-dl" title="下载原图">⬇</button>
           </div>
-          <div class="cap">${esc(it.model.replace('nai-diffusion-', ''))} · ${it.width}×${it.height}</div>`;
-        cell.title = `点击查看大图与参数\n${it.prompt}`;
-        cell.addEventListener('click', (e) => {
-          if (e.target.closest('.hist-quick-reuse')) {
-            e.stopPropagation();
-            reuseAllParams(it);
-            toast('已复用该图参数');
-            return;
-          }
-          if (e.target.closest('.hist-quick-dl')) {
-            e.stopPropagation();
-            const a = document.createElement('a');
-            a.href = `/img/${it.file}`;
-            a.download = `nai-${it.seed || 'image'}.png`;
-            a.click();
-            return;
-          }
-          openLightbox(it);
-        });
-      } else {
-        cell.className = 'hist-cell failed';
-        cell.textContent = it.error ? `✗ ${it.error.slice(0, 50)}` : '✗ 失败';
-      }
-      grid.appendChild(cell);
+          <div class="cap">${esc(it.model.replace('nai-diffusion-', ''))} · ${it.width}×${it.height}</div>
+        </div>`;
+}
+
+/** 历史网格点击统一委托：复用参数 / 下载原图 / 打开灯箱 */
+function bindHistoryGrid() {
+  $('histGrid').addEventListener('click', (e) => {
+    const it = historyById.get(Number(e.target.closest('.hist-cell[data-id]')?.dataset.id));
+    if (!it) return;
+    if (e.target.closest('.hist-quick-reuse')) {
+      reuseAllParams(it);
+      toast('已复用该图参数');
+    } else if (e.target.closest('.hist-quick-dl')) {
+      const a = document.createElement('a');
+      a.href = `/img/${it.file}`;
+      a.download = `nai-${it.seed || 'image'}.png`;
+      a.click();
+    } else {
+      openLightbox(it);
     }
+  });
+}
+
+async function loadHistory() {
+  try {
+    const j = await api('/api/history?limit=60');
+    const grid = $('histGrid');
+    historyById = new Map(j.items.map((it) => [it.id, it]));
+    grid.innerHTML = j.items.length
+      ? j.items.map(historyCellHtml).join('')
+      : '<div style="color:var(--text-dim);font-size:12px;padding:12px;">暂无生成记录</div>';
   } catch {}
 }
 
@@ -3224,9 +3223,21 @@ async function showAnlasModal() {
 function bindAdminModal() {
   $('adminOpenBtn').addEventListener('click', () => {
     $('adminModal').classList.remove('hidden');
-    loadAdminAll();
+    loadActiveAdminTab();
   });
   $('adminCloseBtn').addEventListener('click', () => $('adminModal').classList.add('hidden'));
+  $('gensTbl').querySelector('tbody').addEventListener('click', (e) => {
+    const g = adminGensById.get(Number(e.target.closest('tr[data-id]')?.dataset.id));
+    if (!g) return;
+    if (e.target.closest('.thumb')) {
+      openLightbox(g);
+    } else if (e.target.closest('.act-del-gen')) {
+      if (!confirm('确定删除此全站记录？')) return;
+      api(`/api/admin/generations/${g.id}`, { method: 'DELETE' })
+        .then(() => { toast('已删除记录'); loadGens(); loadStats(); })
+        .catch((err) => toast(err.message, true));
+    }
+  });
   $('adminModal').addEventListener('click', (e) => {
     if (e.target === $('adminModal')) $('adminModal').classList.add('hidden');
   });
@@ -3245,6 +3256,7 @@ function bindAdminModal() {
       tab.classList.add('active');
       document.querySelectorAll('.tab-pane').forEach((p) => p.classList.add('hidden'));
       $(`tab-${tab.dataset.tab}`).classList.remove('hidden');
+      loadActiveAdminTab();
     });
   });
 
@@ -3342,8 +3354,11 @@ function bindAdminModal() {
   });
 }
 
-async function loadAdminAll() {
-  await Promise.all([loadKeys(), loadUsers(), loadGens(), loadStats(), loadPluginTokens()]);
+/** 管理后台按需加载：只拉取当前可见的标签页（原先登录即拉 5 个接口并渲染 200 行记录表） */
+function loadActiveAdminTab() {
+  const loaders = { keys: loadKeys, users: loadUsers, gens: loadGens, stats: loadStats, plugin: loadPluginTokens };
+  const active = document.querySelector('#adminModal .admin-tab-nav .nav-tab.active')?.dataset.tab || 'keys';
+  return loaders[active]?.();
 }
 
 async function loadKeys() {
@@ -3495,14 +3510,13 @@ async function loadUsers() {
   } catch {}
 }
 
+let adminGensById = new Map();
 async function loadGens() {
   try {
     const j = await api('/api/admin/generations?limit=200');
-    const tb = $('gensTbl').querySelector('tbody');
-    tb.innerHTML = '';
-    for (const g of j.items) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
+    adminGensById = new Map(j.items.map((g) => [g.id, g]));
+    // 整表拼成一段 HTML 一次写入，点击统一委托（见 bindAdminModal），不再逐行建节点、绑监听
+    $('gensTbl').querySelector('tbody').innerHTML = j.items.map((g) => `<tr data-id="${g.id}">
         <td>${g.id}</td><td>${esc(g.username)}</td>
         <td>${esc(g.model.replace('nai-diffusion-', ''))}</td>
         <td>${g.width}×${g.height}</td><td>${g.steps}</td>
@@ -3512,17 +3526,7 @@ async function loadGens() {
         <td>${esc(g.created_at)}</td>
         <td class="prompt-cell" title="${esc(g.prompt)}">${esc(g.prompt)}</td>
         <td>${g.file ? `<img class="thumb" src="/thumb/${esc(g.file)}" loading="lazy" decoding="async" style="cursor:pointer;" title="点击打开灯箱">` : '—'}</td>
-        <td><button class="btn tiny ghost-btn act-del-gen" style="color:var(--err)">删除</button></td>`;
-      const thumb = tr.querySelector('.thumb');
-      if (thumb) thumb.addEventListener('click', () => openLightbox(g));
-      tr.querySelector('.act-del-gen').addEventListener('click', () => {
-        if (!confirm('确定删除此全站记录？')) return;
-        api(`/api/admin/generations/${g.id}`, { method: 'DELETE' })
-          .then(() => { toast('已删除记录'); loadGens(); loadStats(); })
-          .catch((e) => toast(e.message, true));
-      });
-      tb.appendChild(tr);
-    }
+        <td><button class="btn tiny ghost-btn act-del-gen" style="color:var(--err)">删除</button></td></tr>`).join('');
   } catch {}
 }
 
