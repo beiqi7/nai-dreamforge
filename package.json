@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "description": "NovelAI image-generation web service",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/beiqi7/nai-dreamforge.git"
+  },
   "engines": {
     "node": ">=22.0.0 <23"
   },
