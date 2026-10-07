@@ -69,7 +69,7 @@ async function onLogin(e) {
       method: 'POST',
       body: JSON.stringify({ username: $('loginUser').value.trim(), password: $('loginPass').value }),
     });
-    ME = { username: j.username, role: j.role };
+    ME = await api('/api/me');
     CURRENT_ROLE = ME?.role || 'user';
     showMain();
     toast(`欢迎归来，${j.username}`);
@@ -94,12 +94,8 @@ async function showMain() {
   if (ME.role === 'admin') {
     $('adminOpenBtn').classList.remove('hidden');
     $('comicStudioNavBtn')?.classList.remove('hidden');
-    $('nSamplesWrap').classList.remove('hidden');
-    $('inpaintBtn').classList.remove('hidden');
-    $('sendToI2iBtn')?.classList.remove('hidden');
-  } else {
-    $('userLockNote').classList.remove('hidden');
   }
+  renderQuota();
 
   await loadMeta();
   bindModeTabs();
@@ -124,9 +120,79 @@ async function showMain() {
 }
 
 function updateUserBadge() {
-  const badge = $('userBadge');
-  badge.textContent = `${ME.username} (${ME.role === 'admin' ? '管理员' : '普通用户'})`;
-  badge.className = 'user-txt' + (ME.role === 'admin' ? ' admin' : '');
+  $('userBadge').textContent = ME.username;
+  const tierPill = $('userTierPill');
+  if (tierPill) {
+    tierPill.textContent = caps().name;
+    tierPill.className = 'user-tier-pill' + (ME.role === 'admin' ? ' admin' : '');
+  }
+  const avatar = $('userAvatar');
+  if (avatar) avatar.textContent = Array.from(ME.username || '?')[0].toUpperCase();
+}
+
+/* ─── 当前用户能力：管理员不限；普通用户取所在等级（/api/me 的 quota.tier） ─── */
+const FREE_CAPS = {
+  name: '普通用户', maxPixels: 1048576, maxSteps: 28, maxSamples: 1,
+  allowImg2img: false, allowInpaint: false, perMinute: 6, perHour: 66, perDay: 240, anlasPerDay: 0,
+};
+function caps() {
+  if (ME?.role === 'admin') {
+    return { admin: true, name: '管理员', maxPixels: 1536 * 1536, maxSteps: 50, maxSamples: 8, allowImg2img: true, allowInpaint: true, anlasPerDay: Infinity };
+  }
+  return { admin: false, ...FREE_CAPS, ...(ME?.quota?.tier || {}) };
+}
+
+/** 生成后刷新额度用量（管理员不受额度约束，跳过） */
+async function refreshQuota() {
+  if (!ME || ME.role === 'admin') return;
+  try {
+    const me = await api('/api/me');
+    ME.quota = me.quota;
+    renderQuota();
+    updateAnlasEstimate();
+  } catch {}
+}
+
+function fmtLimit(n) {
+  return n == null ? '不限' : String(n);
+}
+
+/** 生成按钮上方的额度面板：等级名、频率限制、24 小时出图与 Anlas 用量条 */
+function renderQuota() {
+  const panel = $('quotaPanel');
+  if (!panel) return;
+  if (!ME || ME.role === 'admin') {
+    panel.classList.add('hidden');
+    return;
+  }
+  const c = caps();
+  const usage = ME.quota?.usage || { day: 0, anlasDay: 0 };
+  panel.classList.remove('hidden');
+  $('quotaTierName').textContent = c.name;
+  const rate = [c.perMinute != null ? `${c.perMinute}/分` : null, c.perHour != null ? `${c.perHour}/时` : null].filter(Boolean);
+  $('quotaRate').textContent = rate.length ? `限速 ${rate.join(' · ')}` : '不限速';
+  const setBar = (barId, txtId, used, max) => {
+    const ratio = max == null ? 0 : max === 0 ? 1 : Math.min(1, used / max);
+    const bar = $(barId);
+    bar.style.width = `${Math.round(ratio * 100)}%`;
+    bar.classList.toggle('warn', ratio >= 0.8 && ratio < 1);
+    bar.classList.toggle('full', ratio >= 1);
+    $(txtId).textContent = `${used} / ${fmtLimit(max)}`;
+  };
+  setBar('quotaDayBar', 'quotaDayTxt', usage.day, c.perDay);
+  const anlasRow = $('quotaAnlasRow');
+  if (c.anlasPerDay > 0) {
+    anlasRow.classList.remove('hidden');
+    setBar('quotaAnlasBar', 'quotaAnlasTxt', usage.anlasDay, c.anlasPerDay);
+  } else {
+    anlasRow.classList.add('hidden');
+  }
+  $('quotaCaps').textContent = [
+    `≤${Number((c.maxPixels / 1048576).toFixed(2))}MP`,
+    `≤${c.maxSteps} 步`,
+    c.maxSamples > 1 ? `单次 ≤${c.maxSamples} 张` : '单张',
+    c.anlasPerDay > 0 ? `可用 Anlas` : '仅免费参数',
+  ].join(' · ');
 }
 
 /* ─── 元数据加载 ────────────────────── */
@@ -158,30 +224,30 @@ async function loadMeta() {
   applyRoleRestrictions();
 }
 
-/* ─── 角色权限与免费层尺寸限制 ─────────────── */
-const MAX_FREE_PIXELS = 1048576; // 1024 × 1024
-
-function isFreeResolution(w, h) {
-  return (Number(w) || 0) * (Number(h) || 0) <= MAX_FREE_PIXELS;
+/* ─── 等级限额下的尺寸与步数约束 ─────────────── */
+function withinPixelCap(w, h) {
+  return (Number(w) || 0) * (Number(h) || 0) <= caps().maxPixels;
 }
 
 function align64(n) {
   return Math.max(64, Math.round((Number(n) || 64) / 64) * 64);
 }
 
-function clampFreeInputs(showToast = true) {
-  if (CURRENT_ROLE === 'admin') return;
+function clampToCaps(showToast = true) {
+  const c = caps();
+  if (c.admin) return;
+  const maxPixels = c.maxPixels;
   const wInp = $('widthInp');
   const hInp = $('heightInp');
   if (!wInp || !hInp) return;
   let w = align64(wInp.value);
   let h = align64(hInp.value);
-  if (w * h > MAX_FREE_PIXELS) {
-    // 按比例下压且 64 对齐，确保乘积不超过 1MP
-    const scale = Math.sqrt(MAX_FREE_PIXELS / (w * h));
+  if (w * h > maxPixels) {
+    // 按比例下压且 64 对齐，确保乘积不超过等级上限
+    const scale = Math.sqrt(maxPixels / (w * h));
     w = Math.max(64, Math.floor((w * scale) / 64) * 64);
     h = Math.max(64, Math.floor((h * scale) / 64) * 64);
-    while (w * h > MAX_FREE_PIXELS && (w > 64 || h > 64)) {
+    while (w * h > maxPixels && (w > 64 || h > 64)) {
       if (w >= h && w > 64) w -= 64;
       else if (h > 64) h -= 64;
       else break;
@@ -189,26 +255,26 @@ function clampFreeInputs(showToast = true) {
     wInp.value = w;
     hInp.value = h;
     if (showToast) {
-      toast('免费层分辨率上限 1024×1024', true);
+      toast(`「${c.name}」分辨率上限 ${Number((maxPixels / 1048576).toFixed(2))}MP`, true);
     }
   } else {
     wInp.value = w;
     hInp.value = h;
   }
-  // 步数也同步确保不超过 28
+  // 步数也同步确保不超过等级上限
   const stepsInp = $('stepsInp');
-  if (stepsInp && +stepsInp.value > 28) {
-    stepsInp.value = 28;
+  if (stepsInp && +stepsInp.value > c.maxSteps) {
+    stepsInp.value = c.maxSteps;
   }
   syncRatioChips();
 }
 
 function onDimInput(changedAxis) {
-  if (CURRENT_ROLE !== 'admin') {
+  if (!caps().admin) {
     const w = +$('widthInp').value || 0;
     const h = +$('heightInp').value || 0;
-    if (w * h > MAX_FREE_PIXELS) {
-      clampFreeInputs(true);
+    if (!withinPixelCap(w, h)) {
+      clampToCaps(true);
     } else {
       syncRatioChips();
     }
@@ -219,8 +285,8 @@ function onDimInput(changedAxis) {
 }
 
 function onDimChange(changedAxis) {
-  if (CURRENT_ROLE !== 'admin') {
-    clampFreeInputs(true);
+  if (!caps().admin) {
+    clampToCaps(true);
   } else {
     $('widthInp').value = align64($('widthInp').value);
     $('heightInp').value = align64($('heightInp').value);
@@ -244,81 +310,59 @@ function syncRatioChips() {
 }
 
 function applyRoleRestrictions() {
-  const isAdmin = CURRENT_ROLE === 'admin';
+  const c = caps();
   const chips = document.querySelectorAll('.ratio-chip');
   const wInp = $('widthInp');
   const hInp = $('heightInp');
   const stepsInp = $('stepsInp');
   const nSamplesSel = $('nSamplesSel');
-  const nSamplesWrap = $('nSamplesWrap');
-  const anlasBtn = $('anlasBtn');
-  if (anlasBtn) anlasBtn.classList.toggle('hidden', !isAdmin);
+  $('anlasBtn')?.classList.toggle('hidden', !c.admin);
 
-  if (!isAdmin) {
-    if (stepsInp) {
-      stepsInp.max = 28;
-      if (+stepsInp.value > 28) stepsInp.value = 28;
-    }
-    if (wInp) wInp.max = 1536; // 允许横向/纵向单边自由，但由乘积限制整体
-    if (hInp) hInp.max = 1536;
+  if (stepsInp) {
+    stepsInp.max = c.maxSteps;
+    if (+stepsInp.value > c.maxSteps) stepsInp.value = c.maxSteps;
+  }
+  if (wInp) wInp.max = 1536; // 单边上限固定，整体由等级的像素总数约束
+  if (hInp) hInp.max = 1536;
 
-    // 1. 尺寸预设禁用 > 1024×1024 (1,048,576 像素)
-    chips.forEach((chip) => {
-      const w = +chip.dataset.w;
-      const h = +chip.dataset.h;
-      if (!isFreeResolution(w, h)) {
-        chip.disabled = true;
-        chip.classList.add('disabled');
-        chip.title = '免费层不可用（分辨率超出 1024×1024）';
-      } else {
-        chip.disabled = false;
-        chip.classList.remove('disabled');
-        chip.removeAttribute('title');
-      }
+  // 1. 超出等级像素上限的预设画幅禁用
+  chips.forEach((chip) => {
+    const allowed = withinPixelCap(+chip.dataset.w, +chip.dataset.h);
+    chip.disabled = !allowed;
+    chip.classList.toggle('disabled', !allowed);
+    if (allowed) chip.removeAttribute('title');
+    else chip.title = `「${c.name}」不可用（超出分辨率上限）`;
+  });
+
+  // 2. 张数：按等级上限开放选项
+  if (nSamplesSel) {
+    Array.from(nSamplesSel.options).forEach((opt) => {
+      const allowed = +opt.value <= c.maxSamples;
+      opt.disabled = !allowed;
+      if (allowed) opt.removeAttribute('title');
+      else opt.title = `「${c.name}」单次最多 ${c.maxSamples} 张`;
     });
+    if (+nSamplesSel.value > c.maxSamples) nSamplesSel.value = '1';
+    nSamplesSel.options[0].textContent = c.admin ? '1 张（免费层）' : '1 张';
+  }
+  $('nSamplesWrap')?.classList.toggle('hidden', c.maxSamples <= 1);
 
-    // 2. 张数限制：免费号隐藏或禁用 n_samples > 1 选项并重置为 1
-    if (nSamplesSel) {
-      nSamplesSel.value = '1';
-      Array.from(nSamplesSel.options).forEach((opt) => {
-        if (+opt.value > 1) {
-          opt.disabled = true;
-          opt.title = '免费层不可用（仅限单张）';
-        } else {
-          opt.disabled = false;
-          opt.removeAttribute('title');
-        }
-      });
-    }
-    if (nSamplesWrap) nSamplesWrap.classList.add('hidden');
+  // 3. 图生图 / 局部重绘入口：等级未开放时锁定
+  const lockTab = (el, allowed, label) => {
+    if (!el) return;
+    el.classList.toggle('locked', !allowed);
+    el.title = allowed ? '' : `「${c.name}」未开放${label}`;
+  };
+  lockTab($('modeTabInpaint'), c.allowInpaint, '局部重绘');
+  lockTab($('modeTabImg2img'), c.allowImg2img, '图生图');
+  $('inpaintBtn')?.classList.toggle('hidden', !c.allowInpaint);
+  $('sendToI2iBtn')?.classList.toggle('hidden', !c.allowImg2img);
 
-    // 3. 当前档位若越界，回落到合法档位（如 832×1216，或按比例压回）
-    const curW = +wInp.value || 0;
-    const curH = +hInp.value || 0;
-    if (!isFreeResolution(curW, curH)) {
-      // 回落到默认 2:3 人像档位 832×1216
-      wInp.value = 832;
-      hInp.value = 1216;
-    }
-  } else {
-    // 管理员：解除所有限制
-    if (stepsInp) stepsInp.max = 50;
-    if (wInp) wInp.max = 1536;
-    if (hInp) hInp.max = 1536;
-
-    chips.forEach((chip) => {
-      chip.disabled = false;
-      chip.classList.remove('disabled');
-      chip.removeAttribute('title');
-    });
-
-    if (nSamplesSel) {
-      Array.from(nSamplesSel.options).forEach((opt) => {
-        opt.disabled = false;
-        opt.removeAttribute('title');
-      });
-    }
-    if (nSamplesWrap) nSamplesWrap.classList.remove('hidden');
+  // 4. 当前尺寸若越界，回落到默认 2:3 人像档位（再按上限压回）
+  if (wInp && hInp && !withinPixelCap(+wInp.value, +hInp.value)) {
+    wInp.value = 832;
+    hInp.value = 1216;
+    clampToCaps(false);
   }
 
   syncRatioChips();
@@ -329,8 +373,9 @@ function bindModeTabs() {
   document.querySelectorAll('.mode-tab').forEach((tab) => {
     tab.addEventListener('click', () => {
       const mode = tab.dataset.mode;
-      if (mode !== 'txt2img' && ME.role !== 'admin') {
-        toast('免费用户锁定纯文生图 (Txt2Img)，无 i2i 与 infill 权限', true);
+      const c = caps();
+      if ((mode === 'inpaint' && !c.allowInpaint) || (mode === 'img2img' && !c.allowImg2img)) {
+        toast(`当前等级「${c.name}」未开放${mode === 'inpaint' ? '局部重绘' : '图生图'}，可联系管理员升级`, true);
         return;
       }
       document.querySelectorAll('.mode-tab').forEach((t) => t.classList.remove('active'));
@@ -357,9 +402,10 @@ function bindModeTabs() {
 function bindGenerator() {
   ['scaleInp'].forEach((id) => $(id).addEventListener('input', updateAnlasEstimate));
   $('stepsInp').addEventListener('input', () => {
-    if (CURRENT_ROLE !== 'admin' && +$('stepsInp').value > 28) {
-      $('stepsInp').value = 28;
-      toast('免费层步数上限为 28 步', true);
+    const c = caps();
+    if (+$('stepsInp').value > c.maxSteps) {
+      $('stepsInp').value = c.maxSteps;
+      toast(`「${c.name}」步数上限为 ${c.maxSteps} 步`, true);
     }
     updateAnlasEstimate();
   });
@@ -430,10 +476,8 @@ function bindGenerator() {
     });
   });
 
-  if (ME.role === 'admin') {
-    $('nSamplesSel').addEventListener('change', updateAnlasEstimate);
-    $('keyFanoutChk')?.addEventListener('change', updateAnlasEstimate);
-  }
+  $('nSamplesSel').addEventListener('change', updateAnlasEstimate);
+  $('keyFanoutChk')?.addEventListener('change', updateAnlasEstimate);
 
   $('genBtn').addEventListener('click', doGenerate);
   $('resultPrev')?.addEventListener('click', (e) => {
@@ -529,15 +573,16 @@ function updateAnlasEstimate() {
   const w = +$('widthInp').value, h = +$('heightInp').value;
   const area = w * h;
 
-  if (CURRENT_ROLE !== 'admin' && area > 1048576) {
-    $('sizeWarn').textContent = `⚠ 总像素 ${area} > 1024×1024（超出 Opus 免费上限）`;
+  const c = caps();
+  if (!c.admin && area > c.maxPixels) {
+    $('sizeWarn').textContent = `⚠ 总像素 ${area} 超出「${c.name}」上限 ${c.maxPixels}`;
     $('sizeWarn').classList.remove('hidden');
   } else {
     $('sizeWarn').classList.add('hidden');
   }
 
   const steps = +$('stepsInp').value;
-  const nSamples = CURRENT_ROLE === 'admin' ? +$('nSamplesSel').value : 1;
+  const nSamples = Math.min(+$('nSamplesSel').value || 1, c.maxSamples);
   const isV5 = $('modelSel').value.startsWith('nai-diffusion-5');
 
   const isFreeSize = area <= 1048576 && steps <= 28;
@@ -563,11 +608,21 @@ function updateAnlasEstimate() {
   badge.classList.remove('hidden');
   badge.className = 'tier-tag ' + (free ? 'free' : 'paid');
   if (canFanout) {
-    badge.textContent = `🆓 多 Key 轮询 ×${nSamples}（0 Anlas）`;
-    $('anlasHint').textContent = `💎 预计 0 Anlas · ${nSamples} 把密钥并行`;
+    badge.textContent = `多 Key 轮询 ×${nSamples} · 0 Anlas`;
+    $('anlasHint').textContent = `预计 0 Anlas · ${nSamples} 把密钥并行`;
   } else {
-    badge.textContent = free ? '🆓 Opus 免费层 (0 Anlas)' : `💰 预计约 ${est} Anlas`;
-    $('anlasHint').textContent = free ? '💎 预计 0 Anlas（Opus 免费层）' : `💎 预计约 ${est} Anlas`;
+    badge.textContent = free ? '免费 · 0 Anlas' : `计费 · 约 ${est} Anlas`;
+    $('anlasHint').textContent = free ? '预计 0 Anlas（Opus 免费规格）' : `预计约 ${est} Anlas`;
+    if (!c.admin && !free) {
+      const left = c.anlasPerDay - (ME?.quota?.usage?.anlasDay || 0);
+      if (c.anlasPerDay <= 0) {
+        badge.className = 'tier-tag over';
+        badge.textContent = '当前等级仅支持免费参数';
+      } else {
+        $('anlasHint').textContent = `预计约 ${est} Anlas · 24h 剩余 ${Math.max(0, left)}`;
+        if (est > left) badge.className = 'tier-tag over';
+      }
+    }
   }
   updateSizeStepsSummary();
 }
@@ -615,7 +670,7 @@ async function doGenerate() {
   btn.disabled = true;
   scan.classList.remove('hidden');
   st.className = 'console-status';
-  const nSamples = CURRENT_ROLE === 'admin' ? +$('nSamplesSel').value : 1;
+  const nSamples = Math.min(+$('nSamplesSel').value || 1, caps().maxSamples);
   const areaNow = (+$('widthInp').value || 0) * (+$('heightInp').value || 0);
   const stepsNow = +$('stepsInp').value;
   const singleFreeNow = areaNow <= 1048576 && stepsNow <= 28 && ($('modelSel').value.startsWith('nai-diffusion-5') || currentMode === 'txt2img');
@@ -629,9 +684,7 @@ async function doGenerate() {
     prevStrip.innerHTML = '';
   }
 
-    if (CURRENT_ROLE !== 'admin') {
-      clampFreeInputs(false);
-    }
+    clampToCaps(false);
   try {
     const body = {
       model: $('modelSel').value,
@@ -646,7 +699,7 @@ async function doGenerate() {
       ucPreset: $('ucPresetSel').value,
       qualityTags: $('qualityChk').checked,
       seed: $('seedInp').value ? +$('seedInp').value : undefined,
-      nSamples: CURRENT_ROLE === 'admin' ? +$('nSamplesSel').value : 1,
+      nSamples,
     };
     if (useFanout) body.keyFanout = true;
 
@@ -707,6 +760,7 @@ async function doGenerate() {
       ? `✓ 多 Key 轮询完成 ${j.okCount}/${j.requested} 张 (耗时 ${(j.duration_ms / 1000).toFixed(1)} 秒 · 0 Anlas)${failNote}`
       : `✓ 生成完成 (耗时 ${(j.duration_ms / 1000).toFixed(1)} 秒 · ${j.freeTier ? '免费规格' : '消耗 ' + j.anlas + ' Anlas'})`;
     loadHistory();
+    refreshQuota();
   } catch (err) {
     st.className = 'console-status err';
     st.textContent = `✗ ${err.message}`;
@@ -855,7 +909,7 @@ function bindInpaintModule() {
   });
 
   $('inpaintBtn').addEventListener('click', () => {
-    if (ME.role !== 'admin') return toast('局部重绘仅管理员可用', true);
+    if (!caps().allowInpaint) return toast(`当前等级「${caps().name}」未开放局部重绘`, true);
     $('modeTabInpaint').click();
     if (lastGen?.image) {
       loadInpaintImageFromUrl(lastGen.image);
@@ -1709,9 +1763,7 @@ function reuseAllParams(rec) {
   }
 
   updateAnlasEstimate();
-  if (CURRENT_ROLE !== 'admin') {
-    clampFreeInputs(false);
-  }
+  clampToCaps(false);
 }
 
 /* ═════════════════════════════════════════════════════════════
@@ -3226,6 +3278,8 @@ function bindAdminModal() {
     loadActiveAdminTab();
   });
   $('adminCloseBtn').addEventListener('click', () => $('adminModal').classList.add('hidden'));
+  bindUsersTable();
+  bindTiersTab();
   $('gensTbl').querySelector('tbody').addEventListener('click', (e) => {
     const g = adminGensById.get(Number(e.target.closest('tr[data-id]')?.dataset.id));
     if (!g) return;
@@ -3274,7 +3328,7 @@ function bindAdminModal() {
     } catch (e) { toast(e.message, true); }
     finally {
       btn.disabled = false;
-      btn.textContent = '⚡ 测试全部密钥有效性';
+      btn.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-zap"/></svg><span>测试全部密钥</span>';
     }
   });
   // 一键粘贴密钥
@@ -3344,8 +3398,9 @@ function bindAdminModal() {
     const username = $('newUserName').value.trim();
     const password = $('newUserPass').value;
     const role = $('newUserRole').value;
+    const tierId = $('newUserTier')?.value || undefined;
     try {
-      await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username, password, role }) });
+      await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username, password, role, tierId }) });
       toast(`用户 ${username} 创建成功`);
       $('newUserName').value = '';
       $('newUserPass').value = '';
@@ -3356,7 +3411,7 @@ function bindAdminModal() {
 
 /** 管理后台按需加载：只拉取当前可见的标签页（原先登录即拉 5 个接口并渲染 200 行记录表） */
 function loadActiveAdminTab() {
-  const loaders = { keys: loadKeys, users: loadUsers, gens: loadGens, stats: loadStats, plugin: loadPluginTokens };
+  const loaders = { keys: loadKeys, users: loadUsers, tiers: loadTiers, gens: loadGens, stats: loadStats, plugin: loadPluginTokens };
   const active = document.querySelector('#adminModal .admin-tab-nav .nav-tab.active')?.dataset.tab || 'keys';
   return loaders[active]?.();
 }
@@ -3442,72 +3497,236 @@ async function loadPluginTokens() {
   } catch (e) { toast(e.message, true); }
 }
 
+let adminTiers = [];
+
+async function fetchTiers() {
+  const j = await api('/api/admin/tiers');
+  adminTiers = j.items || [];
+  const sel = $('newUserTier');
+  if (sel) {
+    const prev = sel.value;
+    sel.innerHTML = adminTiers.map((t) => `<option value="${t.id}">${esc(t.name)}${t.is_default ? '（默认）' : ''}</option>`).join('');
+    if (prev && adminTiers.some((t) => String(t.id) === prev)) sel.value = prev;
+    else sel.value = String(adminTiers.find((t) => t.is_default)?.id || '');
+  }
+  return adminTiers;
+}
+
+/** 用量条：used / max（max 为 null 表示不限） */
+function usageBarHtml(label, used, max) {
+  const ratio = max == null ? 0 : max === 0 ? 1 : Math.min(1, used / max);
+  const cls = ratio >= 1 ? 'full' : ratio >= 0.8 ? 'warn' : '';
+  return `<div class="usage-line" title="${esc(label)}：${used} / ${max == null ? '不限' : max}">
+      <span class="usage-label">${esc(label)}</span>
+      <span class="usage-bar"><i class="${cls}" style="width:${Math.round(ratio * 100)}%"></i></span>
+      <span class="usage-num">${used}<small>/${max == null ? '∞' : max}</small></span>
+    </div>`;
+}
+
+let adminUsersById = new Map();
 async function loadUsers() {
   try {
-    const j = await api('/api/admin/users');
-    const tb = $('usersTbl').querySelector('tbody');
-    tb.innerHTML = '';
-    for (const u of j.items) {
-      const tr = document.createElement('tr');
+    const [j] = await Promise.all([api('/api/admin/users'), fetchTiers()]);
+    adminUsersById = new Map(j.items.map((u) => [u.id, u]));
+    const tierOptions = (selected) => adminTiers.map((t) => `<option value="${t.id}"${t.id === selected ? ' selected' : ''}>${esc(t.name)}</option>`).join('');
+    $('usersTbl').querySelector('tbody').innerHTML = j.items.map((u) => {
       const isAdm = u.role === 'admin';
-      const m1Max = 6, h1Max = 66, d1Max = 240;
-      const m1 = u.m1 || 0, h1 = u.h1 || 0, d1 = u.d1 || 0, tot = u.total_ok || 0;
-      
-      let quotaHtml = '';
-      if (isAdm) {
-        quotaHtml = `<span style="color:var(--text-dim);font-size:11px;">无限制 · 累计生图 ${tot} 张</span>`;
-      } else {
-        const mColor = m1 >= m1Max ? 'var(--err)' : (m1 >= m1Max - 1 ? 'var(--warn)' : 'inherit');
-        const hColor = h1 >= h1Max ? 'var(--err)' : (h1 >= h1Max - 10 ? 'var(--warn)' : 'inherit');
-        const dColor = d1 >= d1Max ? 'var(--err)' : (d1 >= d1Max - 20 ? 'var(--warn)' : 'inherit');
-        quotaHtml = `
-          <div style="font-size:11.5px;font-family:var(--font-mono,monospace);line-height:1.4;">
-            <span style="color:${mColor}" title="1分钟内生成/上限6">${m1}/6m</span> · 
-            <span style="color:${hColor}" title="1小时内生成/上限66">${h1}/66h</span> · 
-            <span style="color:${dColor}" title="24小时内生成/上限240">${d1}/240d</span>
-            <span style="color:var(--text-dim);font-size:10.5px;">(累计 ${tot})</span>
-          </div>
-        `;
-      }
-
-      tr.innerHTML = `
-        <td>${u.id}</td><td><b>${esc(u.username)}</b></td>
-        <td>${isAdm ? '<span style="color:#fbbf24">👑 管理员</span>' : '普通用户'}</td>
-        <td>${u.disabled ? '<span style="color:var(--err)">已封禁</span>' : '<span style="color:var(--ok)">正常</span>'}</td>
-        <td>${quotaHtml}</td>
-        <td>${esc(u.created_at)}</td>
-        <td>
+      const hasOverride = u.limit_per_day_override != null || u.anlas_per_day_override != null;
+      const overrideTxt = [
+        u.limit_per_day_override != null ? `${u.limit_per_day_override} 张/天` : null,
+        u.anlas_per_day_override != null ? `${u.anlas_per_day_override} Anlas/天` : null,
+      ].filter(Boolean).join(' · ');
+      return `<tr data-id="${u.id}">
+        <td><div class="user-cell"><span class="avatar-dot">${esc(Array.from(u.username)[0].toUpperCase())}</span><div><b>${esc(u.username)}</b><small>#${u.id} · ${esc(String(u.created_at).slice(0, 10))}</small></div></div></td>
+        <td>${isAdm ? '<span class="role-badge admin">管理员</span>' : `<select class="tier-select act-tier">${tierOptions(u.tier_id)}</select>`}</td>
+        <td>${u.disabled ? '<span class="status-dot off">已封禁</span>' : '<span class="status-dot on">正常</span>'}</td>
+        <td class="usage-cell">${isAdm
+          ? `<span class="muted-note">不受额度限制 · 累计 ${u.total_ok || 0} 张</span>`
+          : usageBarHtml('24h 出图', u.d1 || 0, u.limit_per_day) + (u.anlas_per_day > 0 ? usageBarHtml('24h Anlas', u.a1 || 0, u.anlas_per_day) : '')
+            + `<div class="usage-sub">近 1 分钟 ${u.m1 || 0}${u.limit_per_minute != null ? '/' + u.limit_per_minute : ''} · 近 1 小时 ${u.h1 || 0}${u.limit_per_hour != null ? '/' + u.limit_per_hour : ''} · 累计 ${u.total_ok || 0}</div>`}</td>
+        <td>${isAdm ? '<span class="muted-note">—</span>' : `<button class="btn tiny ghost-btn act-quota" title="单独设置该用户的每日额度">${hasOverride ? esc(overrideTxt) : '跟随等级'} ✎</button>`}</td>
+        <td class="row-actions">
           <button class="btn tiny ghost-btn act-rn">改名</button>
           <button class="btn tiny ghost-btn act-rw">${isAdm ? '降为用户' : '设为管理'}</button>
           <button class="btn tiny ghost-btn act-ds">${u.disabled ? '解禁' : '封禁'}</button>
           <button class="btn tiny ghost-btn act-pw">改密</button>
-          ${!isAdm ? '<button class="btn tiny primary glow act-reset-quota" title="清除近24小时出图频控计数，立即恢复生图配额">⚡ 重置额度</button>' : ''}
-        </td>`;
-      tr.querySelector('.act-rn').addEventListener('click', () => {
-        const name = prompt('输入新的用户名 (2-20位)：', u.username);
-        if (name && name.trim()) {
-          api(`/api/admin/users/${u.id}`, { method: 'POST', body: JSON.stringify({ username: name.trim() }) })
-            .then(() => { toast('用户名已修改'); loadUsers(); })
-            .catch((e) => toast(e.message, true));
-        }
-      });
-      tr.querySelector('.act-rw').addEventListener('click', () => api(`/api/admin/users/${u.id}`, { method: 'POST', body: JSON.stringify({ role: u.role === 'admin' ? 'user' : 'admin' }) }).then(loadUsers).catch((e) => toast(e.message, true)));
-      tr.querySelector('.act-ds').addEventListener('click', () => api(`/api/admin/users/${u.id}`, { method: 'POST', body: JSON.stringify({ disabled: !u.disabled }) }).then(loadUsers).catch((e) => toast(e.message, true)));
-      tr.querySelector('.act-pw').addEventListener('click', () => {
-        const pw = prompt('新密码 (≥8 位)：');
-        if (pw) api(`/api/admin/users/${u.id}`, { method: 'POST', body: JSON.stringify({ password: pw }) }).then(() => toast('密码已重置')).catch((e) => toast(e.message, true));
-      });
-      tr.querySelector('.act-reset-quota')?.addEventListener('click', async () => {
-        if (!confirm(`确定重置用户「${u.username}」的频控额度吗？\n这将清空该用户当前分钟、小时及当日频控计数，用户可立即恢复出图。`)) return;
-        try {
-          await api(`/api/admin/users/${u.id}`, { method: 'POST', body: JSON.stringify({ resetQuota: true }) });
-          toast(`用户 ${u.username} 的频控额度已全部重置！`);
-          loadUsers();
-        } catch (e) { toast(e.message, true); }
-      });
-      tb.appendChild(tr);
+          ${!isAdm ? '<button class="btn tiny ghost-btn act-reset-quota" title="清零当前频控与 24 小时用量，立即恢复出图">重置用量</button>' : ''}
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+function updateUser(id, body, okMsg) {
+  return api(`/api/admin/users/${id}`, { method: 'POST', body: JSON.stringify(body) })
+    .then(() => { if (okMsg) toast(okMsg); loadUsers(); })
+    .catch((e) => { toast(e.message, true); loadUsers(); });
+}
+
+/** 用户表交互统一委托（只绑定一次） */
+function bindUsersTable() {
+  const tbody = $('usersTbl').querySelector('tbody');
+  tbody.addEventListener('change', (e) => {
+    const sel = e.target.closest('.act-tier');
+    if (!sel) return;
+    const u = adminUsersById.get(Number(sel.closest('tr').dataset.id));
+    const tier = adminTiers.find((t) => String(t.id) === sel.value);
+    u.tier_id = Number(sel.value); // 先更新本地数据，列表刷新前打开的额度弹窗也不会显示旧等级
+    updateUser(u.id, { tierId: u.tier_id }, `已将 ${u.username} 调整为「${tier?.name}」`);
+  });
+  tbody.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button');
+    const u = btn && adminUsersById.get(Number(btn.closest('tr')?.dataset.id));
+    if (!u) return;
+    if (btn.classList.contains('act-rn')) {
+      const name = prompt('输入新的用户名 (2-20位)：', u.username);
+      if (name && name.trim()) updateUser(u.id, { username: name.trim() }, '用户名已修改');
+    } else if (btn.classList.contains('act-rw')) {
+      updateUser(u.id, { role: u.role === 'admin' ? 'user' : 'admin' });
+    } else if (btn.classList.contains('act-ds')) {
+      updateUser(u.id, { disabled: !u.disabled });
+    } else if (btn.classList.contains('act-pw')) {
+      const pw = prompt('新密码 (≥8 位)：');
+      if (pw) updateUser(u.id, { password: pw }, '密码已重置');
+    } else if (btn.classList.contains('act-reset-quota')) {
+      if (!confirm(`确定重置用户「${u.username}」的用量吗？\n此前的生成不再计入频控与 24 小时额度，用户可立即恢复出图。`)) return;
+      updateUser(u.id, { resetQuota: true }, `已重置 ${u.username} 的用量`);
+    } else if (btn.classList.contains('act-quota')) {
+      openQuotaDialog(u);
     }
-  } catch {}
+  });
+}
+
+/** 单人额度覆盖：留空 = 跟随等级 */
+function openQuotaDialog(u) {
+  if (document.querySelector('.quota-dialog')) return;
+  const tier = adminTiers.find((t) => t.id === u.tier_id);
+  const bg = document.createElement('div');
+  bg.className = 'modal-backdrop';
+  bg.innerHTML = `
+    <form class="modal-window quota-dialog">
+      <div class="modal-title-row"><h3>单独设置额度 · ${esc(u.username)}</h3></div>
+      <p class="dialog-hint">留空表示跟随所在等级「${esc(tier?.name || '')}」（每天 ${tier?.limit_per_day ?? '不限'} 张 · 每天 ${tier?.anlas_per_day ?? 0} Anlas）。</p>
+      <label class="form-row"><span>每天最多出图（张）</span>
+        <input class="styled-admin-input" name="day" type="number" min="0" placeholder="跟随等级" value="${u.limit_per_day_override ?? ''}"></label>
+      <label class="form-row"><span>每天最多消耗 Anlas</span>
+        <input class="styled-admin-input" name="anlas" type="number" min="0" placeholder="跟随等级" value="${u.anlas_per_day_override ?? ''}"></label>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost-btn" data-act="cancel">取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>`;
+  document.body.appendChild(bg);
+  const form = bg.querySelector('form');
+  const close = () => bg.remove();
+  bg.addEventListener('click', (e) => { if (e.target === bg || e.target.dataset.act === 'cancel') close(); });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = { limitPerDayOverride: form.elements.day.value, anlasPerDayOverride: form.elements.anlas.value };
+    close();
+    await updateUser(u.id, body, '额度已保存');
+  });
+  form.day.focus();
+}
+
+/* ─── 用户等级管理 ─────────────────────────────────────── */
+const PIXEL_PRESETS = [
+  [1048576, '1MP · 1024×1024（Opus 免费上限）'],
+  [1572864, '1.5MP · 1024×1536'],
+  [2359296, '2.25MP · 1536×1536（最大）'],
+];
+
+function tierCardHtml(t, isNew = false) {
+  const pixelOptions = [...PIXEL_PRESETS];
+  if (!pixelOptions.some(([v]) => v === t.max_pixels)) pixelOptions.push([t.max_pixels, `${Number((t.max_pixels / 1048576).toFixed(2))}MP（自定义）`]);
+  const num = (name, value, attrs = '') => `<input class="styled-admin-input" name="${name}" type="number" ${attrs} value="${value ?? ''}">`;
+  return `<form class="tier-card${isNew ? ' is-new' : ''}" data-id="${isNew ? '' : t.id}">
+    <div class="tier-card-head">
+      <input class="tier-name-input" name="name" maxlength="20" value="${esc(t.name)}" placeholder="等级名称" required>
+      <span class="tier-meta">${isNew ? '新等级' : `${t.user_count || 0} 位用户`}${t.is_default ? ' · <b>默认</b>' : ''}</span>
+    </div>
+    <div class="tier-grid">
+      <label><span>最大分辨率</span><select class="styled-admin-select" name="max_pixels">${pixelOptions.map(([v, l]) => `<option value="${v}"${v === t.max_pixels ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label><span>最大步数</span>${num('max_steps', t.max_steps, 'min="1" max="50" required')}</label>
+      <label><span>单次最多张数</span>${num('max_samples', t.max_samples, 'min="1" max="8" required')}</label>
+      <label><span>每日 Anlas 额度</span>${num('anlas_per_day', t.anlas_per_day, 'min="0" required')}<small>0 = 只能用免费参数</small></label>
+      <label><span>每分钟上限（张）</span>${num('limit_per_minute', t.limit_per_minute, 'min="0" placeholder="不限"')}</label>
+      <label><span>每小时上限（张）</span>${num('limit_per_hour', t.limit_per_hour, 'min="0" placeholder="不限"')}</label>
+      <label><span>每天上限（张）</span>${num('limit_per_day', t.limit_per_day, 'min="0" placeholder="不限"')}</label>
+      <div class="tier-toggles">
+        <label class="chk-container"><input type="checkbox" name="allow_img2img"${t.allow_img2img ? ' checked' : ''}><span class="chk-custom"></span><span class="chk-text">允许图生图</span></label>
+        <label class="chk-container"><input type="checkbox" name="allow_inpaint"${t.allow_inpaint ? ' checked' : ''}><span class="chk-custom"></span><span class="chk-text">允许局部重绘</span></label>
+      </div>
+    </div>
+    <div class="tier-card-actions">
+      ${!isNew && !t.is_default ? '<button type="button" class="btn tiny ghost-btn danger act-del-tier">删除等级</button>' : '<span></span>'}
+      <div>
+        ${isNew ? '<button type="button" class="btn tiny ghost-btn act-cancel-tier">取消</button>' : ''}
+        <button type="submit" class="btn tiny primary">${isNew ? '创建等级' : '保存修改'}</button>
+      </div>
+    </div>
+  </form>`;
+}
+
+function readTierForm(form) {
+  const v = (name) => form.elements[name].value.trim();
+  const nullable = (name) => (v(name) === '' ? null : Number(v(name)));
+  return {
+    name: v('name'),
+    max_pixels: Number(v('max_pixels')),
+    max_steps: Number(v('max_steps')),
+    max_samples: Number(v('max_samples')),
+    anlas_per_day: Number(v('anlas_per_day') || 0),
+    limit_per_minute: nullable('limit_per_minute'),
+    limit_per_hour: nullable('limit_per_hour'),
+    limit_per_day: nullable('limit_per_day'),
+    allow_img2img: form.elements.allow_img2img.checked,
+    allow_inpaint: form.elements.allow_inpaint.checked,
+  };
+}
+
+async function loadTiers() {
+  try {
+    await fetchTiers();
+    $('tiersList').innerHTML = adminTiers.map((t) => tierCardHtml(t)).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+function bindTiersTab() {
+  const list = $('tiersList');
+  $('tierAddBtn').addEventListener('click', () => {
+    if (list.querySelector('.tier-card.is-new')) return;
+    const base = adminTiers.find((t) => t.is_default) || adminTiers[0];
+    list.insertAdjacentHTML('beforeend', tierCardHtml({ ...base, name: '', is_default: 0, user_count: 0 }, true));
+    list.lastElementChild.querySelector('[name=name]').focus();
+  });
+  list.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const body = readTierForm(form);
+    try {
+      if (form.dataset.id) {
+        await api(`/api/admin/tiers/${form.dataset.id}`, { method: 'POST', body: JSON.stringify(body) });
+        toast(`等级「${body.name}」已保存`);
+      } else {
+        await api('/api/admin/tiers', { method: 'POST', body: JSON.stringify(body) });
+        toast(`已创建等级「${body.name}」`);
+      }
+      loadTiers();
+    } catch (err) { toast(err.message, true); }
+  });
+  list.addEventListener('click', async (e) => {
+    const form = e.target.closest('.tier-card');
+    if (e.target.closest('.act-cancel-tier')) return form.remove();
+    if (!e.target.closest('.act-del-tier')) return;
+    const t = adminTiers.find((x) => String(x.id) === form.dataset.id);
+    if (!confirm(`删除等级「${t.name}」？\n其下 ${t.user_count || 0} 位用户会移回默认等级。`)) return;
+    try {
+      const r = await api(`/api/admin/tiers/${t.id}`, { method: 'DELETE' });
+      toast(`已删除，${r.moved} 位用户移回默认等级`);
+      loadTiers();
+    } catch (err) { toast(err.message, true); }
+  });
 }
 
 let adminGensById = new Map();
