@@ -1,0 +1,12 @@
+[Unit]
+Description=NAI Site Daily Image Backup to Dual Cloud
+Documentation=https://github.com/
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/nai-site
+ExecStart=/bin/bash /opt/nai-site/scripts/backup-images.sh
+StandardOutput=journal
+StandardError=journal

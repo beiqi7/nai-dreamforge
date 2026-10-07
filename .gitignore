@@ -1,0 +1,29 @@
+# ── 运行时数据（含 PST 密钥，绝对不可入库）──
+data/
+scripts/.backup_state
+scripts/.idle-backup-state
+
+# ── 凭据 / 密钥 ──
+scripts/*.env
+scripts/*.env.*
+scripts/*.bak*
+scripts/backup.env.bak*
+!scripts/backup.env.example
+.env
+.env.*
+
+# ── 日志 ──
+*.log
+logs/
+
+# ── 依赖与缓存 ──
+node_modules/
+__pycache__/
+*.pyc
+.npm/
+
+# ── 编辑器 / 系统 ──
+.DS_Store
+.idea/
+.vscode/
+*.swp

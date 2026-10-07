@@ -1,0 +1,11 @@
+[Unit]
+Description=NAI Site Daily Image Backup Timer
+Documentation=https://github.com/
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0c0e14">
+<title>NovelAI Web Studio</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- 1. 登录 -->
+<div id="authView" class="auth-wrap hidden">
+  <div class="auth-ambient"></div>
+  <div class="auth-box">
+    <div class="auth-title">NovelAI Web Studio</div>
+    <div class="auth-sub">基于 NovelAI API 的生图平台</div>
+
+    <form id="loginForm" class="auth-form">
+      <div class="form-group">
+        <label>用户名</label>
+        <div class="input-wrap">
+          <span class="input-icon">👤</span>
+          <input id="loginUser" placeholder="输入用户名" autocomplete="username" required autofocus>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>密码</label>
+        <div class="input-wrap">
+          <span class="input-icon">🔑</span>
+          <input id="loginPass" type="password" placeholder="输入访问密码" autocomplete="current-password" required>
+        </div>
+      </div>
+
+      <button type="submit" class="btn primary auth-btn glow">
+        <span>登录</span>
+        <span class="arrow-icon">→</span>
+      </button>
+
+      <div id="loginErr" class="auth-err"></div>
+    </form>
+
+    <div class="auth-note">
+      <span>请使用管理员分配的账号登录</span>
+    </div>
+  </div>
+</div>
+
+<!-- 2. 主界面 -->
+<div id="mainView" class="app-layout hidden">
+  <!-- 顶栏导航 -->
+  <header class="navbar">
+    <div class="nav-brand">
+      <span class="nav-title">NovelAI Studio</span>
+      <span class="nav-tag">V5</span>
+    </div>
+
+    <div class="nav-actions">
+      <!-- 单独画廊视图入口 -->
+      <button id="galleryNavBtn" class="pill-btn gallery-chip" title="切换到专属画廊视图">
+        <span class="chip-icon">🖼️</span>
+        <span id="galleryNavTxt">作品画廊</span>
+      </button>
+
+      <button id="anlasBtn" class="pill-btn anlas-chip" title="查看当前密钥池 Anlas 余额">
+        <span class="chip-icon">💎</span>
+        <span id="anlasBadge">查询额度</span>
+      </button>
+      <!-- 管理员专属：分镜连环画工作室入口 -->
+      <button id="comicStudioNavBtn" class="pill-btn comic-chip hidden" title="连续分镜与漫画剧情工作室">
+        <span class="chip-icon">🎬</span>
+        <span>漫画工作室</span>
+      </button>
+
+      <!-- 管理员专属入口 -->
+      <button id="adminOpenBtn" class="pill-btn admin-chip hidden" title="管理后台">
+        <span class="chip-icon">⚙️</span>
+        <span>管理后台</span>
+      </button>
+      <!-- 个人设置入口（可改名与改密） -->
+      <button id="userProfileBtn" class="pill-btn user-chip" title="点击修改用户名与密码">
+        <span class="chip-icon">👤</span>
+        <span id="userBadge" class="user-txt"></span>
+        <span class="chip-edit">✏️</span>
+      </button>
+
+      <button id="logoutBtn" class="btn ghost-btn nav-logout">退出</button>
+    </div>
+  </header>
+
+  <!-- 视图一：单图生成主工作区 -->
+  <div id="standardStudioView" class="studio">
+    <!-- ═══ 左控制台 ═══ -->
+    <aside class="sidebar">
+      <div class="sidebar-scroll">
+        <!-- 1. 模式切换器（Txt2Img / Inpaint / Img2Img） -->
+        <div class="mode-tabs-wrap">
+          <div class="mode-tabs">
+            <button type="button" class="mode-tab active" data-mode="txt2img">
+              <span class="mode-icon">✨</span>
+              <span class="mode-label-full">文生图</span>
+              <span class="mode-label-short">文生</span>
+            </button>
+            <button type="button" class="mode-tab" data-mode="inpaint" id="modeTabInpaint">
+              <span class="mode-icon">🖌</span>
+              <span class="mode-label-full">局部重绘 (Inpaint)</span>
+              <span class="mode-label-short">重绘</span>
+            </button>
+            <button type="button" class="mode-tab" data-mode="img2img" id="modeTabImg2img">
+              <span class="mode-icon">🖼</span>
+              <span class="mode-label-full">图生图</span>
+              <span class="mode-label-short">图生</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 2. 重绘专属图片上传/涂抹区（切到 Inpaint 时醒目展开！） -->
+        <div id="inpaintWorkspace" class="card inpaint-card hidden">
+          <div class="card-title-bar">
+            <span class="sec-title"><span class="title-icon">🖌</span> 重绘原图与蒙版</span>
+            <button type="button" id="ipClearBtn" class="btn ghost-btn tiny">清空蒙版</button>
+          </div>
+
+          <!-- 拖拽/点击上传大框 -->
+          <div id="ipDropzone" class="dropzone">
+            <div class="dropzone-inner">
+              <span class="drop-icon">📤</span>
+              <div class="drop-text">点击选择或拖拽上传原图</div>
+              <div class="drop-sub">也支持直接 Ctrl+V 粘贴截图 · 自动缩放至推荐尺寸</div>
+            </div>
+            <input id="ipFileInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden">
+          </div>
+
+          <!-- 画布编辑区（上传后展开） -->
+          <div id="ipCanvasArea" class="ip-canvas-area hidden">
+            <div class="ip-tools">
+              <label class="tool-item">
+                <span>笔刷</span>
+                <input id="ipBrushSize" type="range" min="6" max="100" value="36">
+              </label>
+              <label class="tool-item">
+                <span>强度</span>
+                <input id="ipStrengthRange" type="range" min="0.1" max="1.0" step="0.05" value="0.8">
+                <span id="ipStrengthVal" class="val-num">0.8</span>
+              </label>
+              <button type="button" id="ipReuploadBtn" class="btn ghost-btn tiny">换图</button>
+            </div>
+            <div class="canvas-wrapper">
+              <canvas id="ipPaintCanvas"></canvas>
+            </div>
+            <div class="ip-canvas-tip">
+              <span>白色 = 重绘区域 · 黑色 = 保持原样</span>
+              <span id="ipCoverageTxt">覆盖率 0%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. 图生图专属上传区 -->
+        <div id="img2imgWorkspace" class="card inpaint-card hidden">
+          <div class="card-title-bar">
+            <span class="sec-title"><span class="title-icon">🖼</span> 图生图原图</span>
+            <button type="button" id="i2iRemoveBtn" class="btn ghost-btn tiny">移除</button>
+          </div>
+          <div id="i2iDropzone" class="dropzone">
+            <div class="dropzone-inner">
+              <span class="drop-icon">📁</span>
+              <div class="drop-text">点击或拖入原图</div>
+              <div class="drop-sub">支持 Ctrl+V 粘贴 · 影响整体构图与色彩</div>
+            </div>
+            <input id="i2iFileInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden">
+          </div>
+          <div id="i2iPreviewArea" class="i2i-prev-area hidden">
+            <img id="i2iPreviewImg" alt="原图预览">
+            <div class="ip-tools">
+              <label class="tool-item full">
+                <span>变换强度 (Strength)</span>
+                <input id="i2iStrengthRange" type="range" min="0.1" max="0.99" step="0.05" value="0.65">
+                <span id="i2iStrengthVal" class="val-num">0.65</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. 提示词卡片（双语/排它） -->
+        <div class="card prompt-box">
+          <div class="card-title-bar">
+            <label for="promptInp" class="sec-title">
+              <span class="title-icon">✨</span> 提示词 (Prompt)
+            </label>
+            <div class="prompt-head-actions">
+              <span id="promptCharCount" class="title-tip" style="font-family:var(--font-mono);font-size:11px;">0 字符</span>
+              <button type="button" id="formatPromptBtn" class="btn ghost-btn tiny" title="整理逗号与多余空格">整理</button>
+              <button type="button" id="clearPromptBtn" class="btn ghost-btn tiny" title="清空提示词">清空</button>
+              <button type="button" id="promptLibBtn" class="btn ghost-btn tiny lib-open-btn" title="常用词库">📚 片段库</button>
+            </div>
+          </div>
+
+          <!-- 常用提示词快捷标签 -->
+          <div class="tag-capsules">
+            <span class="capsule" data-tag="depthness, high complexity">细节增强</span>
+            <span class="capsule" data-tag="ethereal lighting, soft glow">柔和光照</span>
+            <span class="capsule" data-tag="cyberpunk, neon glow, city reflection">赛博朋克</span>
+            <span class="capsule" data-tag="watercolor, loose brushwork">水彩风</span>
+            <span class="capsule" data-tag="transparent background">透明背景</span>
+          </div>
+
+          <textarea id="promptInp" rows="4" placeholder="输入提示词，例如：1girl, silver hair, blue eyes, solo, masterpiece, best quality..."></textarea>
+
+          <div class="card-title-bar sub-bar">
+            <div class="sec-title-sm-wrap">
+              <label for="ucInp" class="sec-title-sm">
+                <span class="title-icon">🚫</span> 排除元素 (Negative)
+              </label>
+              <button type="button" id="ucLibBtn" class="btn ghost-btn tiny lib-open-btn" title="从片段库插入 UC 片段">📚</button>
+            </div>
+            <div class="uc-preset-wrap">
+              <select id="ucPresetSel">
+                <option value="none">无内置预设（自定义）</option>
+                <option value="transparent">🪟 透明底 (transparent background)</option>
+              </select>
+            </div>
+          </div>
+          <textarea id="ucInp" rows="2" placeholder="负面提示词（选填，预设会自动置顶）..."></textarea>
+        </div>
+
+        <!-- 独立角色提示词 (Character Prompts) -->
+        <div class="card char-box">
+          <div class="card-title-bar">
+            <span class="sec-title"><span class="title-icon">👥</span> 独立角色 (Character Prompts)</span>
+            <div class="char-head-right">
+              <span id="charCountTag" class="char-count hidden">0/22</span>
+              <button type="button" id="charFromLibBtn" class="btn ghost-btn tiny" title="从片段库选择并导入角色">📚 从库中选</button>
+              <button type="button" id="charAddBtn" class="btn ghost-btn tiny">＋ 添加角色</button>
+            </div>
+          </div>
+          <div class="char-tip">独立编写每个角色的提示词并指定在画面的位置（最多支持 22 个角色）。</div>
+          <div id="charTabs" class="char-tabs"></div>
+          <div id="charPromptsWrap" class="char-wrap"></div>
+        </div>
+
+        <!-- 读图学习：解析 NovelAI PNG meta -->
+        <div class="card meta-learn-card fold-card collapsed" id="metaLearnCard">
+          <div class="card-title-bar fold-head" id="metaLearnHead">
+            <span class="sec-title"><span class="title-icon">🧬</span> 读取图片参数<span class="lib-fold-hint">（点击展开）</span></span>
+            <span class="fold-right">
+              <span id="metaLearnSummary" class="fold-summary">拖入 NAI PNG</span>
+              <span class="lib-add-arrow">▼</span>
+            </span>
+          </div>
+          <div id="metaLearnBody" class="fold-body">
+            <div id="metaDrop" class="dropzone meta-drop">
+              <div class="dropzone-inner">
+                <span class="drop-icon">📥</span>
+                <div class="drop-text">拖入或粘贴 NovelAI PNG 图片读取参数</div>
+                <div class="drop-sub">请用原 PNG（本站「下载原图」），截图或另存为会丢掉 meta</div>
+              </div>
+              <input id="metaFileInp" type="file" accept="image/png,image/webp" class="hidden">
+            </div>
+            <div class="meta-toolbar">
+              <button type="button" id="metaFromCurrentBtn" class="btn ghost-btn tiny">解析当前出图</button>
+            </div>
+            <div id="metaPreviewWrap" class="meta-preview-wrap hidden">
+              <img id="metaPreviewImg" alt="读图预览">
+              <div class="meta-preview-side">
+                <div id="metaStatus" class="meta-status"></div>
+                <button type="button" id="metaRemoveBtn" class="btn ghost-btn tiny">✕ 去掉图片</button>
+              </div>
+            </div>
+            <div id="metaFields" class="meta-fields hidden"></div>
+            <div id="metaActions" class="meta-actions hidden">
+              <button type="button" id="metaApplyPromptBtn" class="btn primary tiny">导入提示词</button>
+              <button type="button" id="metaApplyAllBtn" class="btn ghost-btn tiny">导入全部参数</button>
+              <button type="button" id="metaApplyCharsBtn" class="btn ghost-btn tiny">只导入角色</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 卡片一：画幅与步进（默认可折叠，防误触步数） -->
+        <div class="card settings-box fold-card collapsed" id="sizeStepsCard">
+          <div class="card-title-bar fold-head" id="sizeStepsHead">
+            <span class="sec-title"><span class="title-icon">🎛</span> 尺寸与步数<span class="lib-fold-hint">（点击展开）</span></span>
+            <span class="fold-right">
+              <span id="sizeStepsSummary" class="fold-summary">832×1216 · 28步 · CFG 5</span>
+              <span class="lib-add-arrow" id="sizeStepsArrow">▼</span>
+            </span>
+          </div>
+          <div id="sizeStepsBody" class="fold-body">
+            <div class="field-item">
+              <label class="field-label">基础模型</label>
+              <select id="modelSel" class="styled-select"></select>
+            </div>
+
+            <div class="field-item">
+              <label class="field-label">预设画幅比例</label>
+              <div class="ratio-bar">
+                <button type="button" class="ratio-chip active" data-w="832" data-h="1216">
+                  <span class="ratio-box r-portrait"></span>
+                  <span class="ratio-txt">2:3 人像</span>
+                </button>
+                <button type="button" class="ratio-chip" data-w="1024" data-h="1024">
+                  <span class="ratio-box r-square"></span>
+                  <span class="ratio-txt">1:1 方幅</span>
+                </button>
+                <button type="button" class="ratio-chip" data-w="1216" data-h="832">
+                  <span class="ratio-box r-landscape"></span>
+                  <span class="ratio-txt">3:2 宽景</span>
+                </button>
+                <button type="button" class="ratio-chip" data-w="1088" data-h="1920">
+                  <span class="ratio-box r-tall"></span>
+                  <span class="ratio-txt">9:16 壁纸</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="dim-picker">
+              <div class="dim-input-box">
+                <span class="dim-axis">宽</span>
+                <input id="widthInp" type="number" min="64" max="1536" step="64" value="832">
+              </div>
+              <span class="dim-cross">×</span>
+              <div class="dim-input-box">
+                <span class="dim-axis">高</span>
+                <input id="heightInp" type="number" min="64" max="1536" step="64" value="1216">
+              </div>
+            </div>
+            <div id="sizeWarn" class="warn-pill hidden"></div>
+
+            <div class="slider-box">
+              <div class="slider-label-row">
+                <span>采样步数 (Steps)</span>
+                <span id="stepsVal" class="slider-readout">28</span>
+              </div>
+              <input id="stepsInp" type="range" min="1" max="50" value="28">
+            </div>
+
+            <div class="slider-box">
+              <div class="slider-label-row">
+                <span>引导系数 (CFG Scale)</span>
+                <span id="scaleVal" class="slider-readout">5.0</span>
+              </div>
+              <input id="scaleInp" type="range" min="1" max="10" step="0.1" value="5">
+            </div>
+          </div>
+        </div>
+
+        <!-- 卡片二：高级控制 -->
+        <div class="card settings-box">
+          <div class="sec-title"><span class="title-icon">⚙️</span> 高级设置</div>
+
+          <div class="field-item">
+            <label class="field-label">采样算法</label>
+            <select id="samplerSel" class="styled-select"></select>
+          </div>
+
+          <div class="field-inline-row">
+            <div class="field-half">
+              <label class="field-label">随机种子</label>
+              <input id="seedInp" type="number" placeholder="随机生成">
+            </div>
+            <div class="field-half checkbox-half">
+              <label class="chk-container">
+                <input id="qualityChk" type="checkbox" checked>
+                <span class="chk-custom"></span>
+                <span class="chk-text">画质增强 (Quality Boost)</span>
+              </label>
+            </div>
+          </div>
+
+          <div id="nSamplesWrap" class="field-item hidden">
+            <label class="field-label">批量生成张数</label>
+            <select id="nSamplesSel" class="styled-select">
+              <option value="1" selected>1 张（免费层）</option>
+              <option value="2">2 张</option>
+              <option value="3">3 张</option>
+              <option value="4">4 张</option>
+              <option value="6">6 张</option>
+              <option value="8">8 张</option>
+            </select>
+            <label id="keyFanoutWrap" class="chk-container key-fanout-row">
+              <input id="keyFanoutChk" type="checkbox" checked>
+              <span class="chk-custom"></span>
+              <span class="chk-text">多 Key 并行出图：每张单独请求不同密钥（免费层 0 Anlas，仅管理员）</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. 状态与生成按钮吸底固定 -->
+      <div class="action-footer">
+        <div class="action-status-row">
+          <span id="anlasHint" class="cost-tag">💎 预计 0 Anlas</span>
+          <span id="tierBadge" class="tier-tag free hidden">🆓 Opus 免费层</span>
+        </div>
+
+        <button id="genBtn" class="btn primary exec-btn glow">
+          <span class="btn-icon">✨</span>
+          <span class="btn-main-text">生成图片</span>
+        </button>
+
+        <div id="genStatus" class="console-status"></div>
+
+        <div id="userLockNote" class="lock-tip hidden">
+          <span class="lock-ico">🔒</span>
+          <span>普通用户配额：单张/≤28步/免费，限速 6张/分 · 66张/时 · 240张/天</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ═══ 右侧预览与画廊 ═══ -->
+    <main class="stage">
+      <!-- 预览画布主卡 -->
+      <div class="viewport-card">
+        <div class="canvas-frame" id="imgWrap">
+          <div class="scanning-bar hidden" id="scanBar"></div>
+          <div class="canvas-empty" id="placeholder">
+            <div class="cosmic-ring">
+              <div class="cosmic-star"></div>
+            </div>
+            <div class="empty-title">暂无图片</div>
+            <div class="empty-desc">在左侧输入提示词后点击生成</div>
+          </div>
+          <img id="resultImg" class="hidden clickable-img" alt="生成结果" title="点击放大查看原图">
+          <div id="resultNav" class="result-nav hidden">
+            <button type="button" id="resultPrev" class="result-nav-btn prev" title="上一张">‹</button>
+            <span id="resultNavIdx" class="result-nav-idx">1 / 1</span>
+            <button type="button" id="resultNext" class="result-nav-btn next" title="下一张">›</button>
+          </div>
+        </div>
+
+        <!-- 动作操作条 -->
+        <div class="canvas-toolbar hidden" id="imgBar">
+          <div class="action-btn-group">
+            <button id="dlBtn" class="btn ghost-btn">⬇ 下载原图</button>
+            <button id="copyPromptDirectBtn" class="btn ghost-btn">📋 复制提示词</button>
+            <button id="seedBtn" class="btn ghost-btn">🎲 复用种子</button>
+            <button id="reuseAllBtn" class="btn ghost-btn">⚙️ 复用全部参数</button>
+            <button id="sendToI2iBtn" class="btn ghost-btn hidden">🖼 送入图生图</button>
+            <button id="inpaintBtn" class="btn action-pill-btn hidden">🖌 重绘此图</button>
+          </div>
+          <div id="metaInfo" class="meta-data-tag"></div>
+        </div>
+        <div id="batchStrip" class="batch-strip hidden"></div>
+      </div>
+
+
+      <!-- 历史作品瀑布 -->
+      <section class="gallery-card">
+        <div class="gallery-header">
+          <div class="sec-title">
+            <span class="title-icon">🎞</span> 历史画廊
+          </div>
+          <button id="histRefresh" class="btn ghost-btn tiny">🔄 刷新记录</button>
+        </div>
+        <div id="histGrid" class="gallery-grid"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 视图三：单独画廊工作区（带批量删除、批量收藏、批量打包下载） -->
+  <div id="dedicatedGalleryView" class="dedicated-gallery hidden">
+    <div class="gallery-view-header">
+      <div class="gallery-view-title-box">
+        <div class="gallery-main-title">
+          <span class="title-icon">🖼️</span>
+          <span>我的个人作品画廊</span>
+        </div>
+        <div class="gallery-sub-title">支持多选管理、批量收藏标记、批量删除以及打包打包下载 ZIP</div>
+      </div>
+
+      <div class="gallery-filter-tabs">
+        <button type="button" class="gallery-tab active" data-filter="all">全部作品 (<span id="galCountAll">0</span>)</button>
+        <button type="button" class="gallery-tab" data-filter="fav">❤️ 仅看收藏 (<span id="galCountFav">0</span>)</button>
+      </div>
+
+      <div class="gallery-header-controls">
+        <button type="button" id="galRefreshBtn" class="btn ghost-btn small">🔄 刷新</button>
+        <button type="button" id="galBackStudioBtn" class="btn ghost-btn small">返回工作台 ✕</button>
+      </div>
+    </div>
+
+    <!-- 批量工具栏（常驻或选中时激活高亮） -->
+    <div class="gallery-toolbar-card">
+      <div class="toolbar-left">
+        <label class="chk-container select-all-chk">
+          <input type="checkbox" id="galSelectAll">
+          <span class="chk-custom"></span>
+          <span class="chk-text">全选当前</span>
+        </label>
+        <span id="galSelectedCount" class="selected-badge hidden">已选 0 项</span>
+      </div>
+
+      <div class="toolbar-actions">
+        <button type="button" id="galBatchFavBtn" class="btn ghost-btn small action-fav" disabled>
+          <span>❤️ 批量收藏</span>
+        </button>
+        <button type="button" id="galBatchUnfavBtn" class="btn ghost-btn small action-unfav" disabled>
+          <span>🤍 取消收藏</span>
+        </button>
+        <button type="button" id="galBatchDlBtn" class="btn primary small glow action-dl" disabled>
+          <span>📦 批量下载 ZIP</span>
+        </button>
+        <button type="button" id="galBatchDelBtn" class="btn ghost-btn small action-del" disabled style="color:var(--err);">
+          <span>🗑️ 批量删除</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 瀑布流/网格容器 -->
+    <div id="galGrid" class="dedicated-gallery-grid">
+      <div class="lib-empty">正在加载画廊作品…</div>
+    </div>
+  </div>
+
+  <!-- 视图二：管理员专属分镜/连环画剧情工作室 (Comic Studio) -->
+  <div id="comicStudioView" class="comic-studio hidden">
+    <div class="comic-layout">
+      <!-- 左侧：全局锁定参数基底配置 -->
+      <aside class="comic-sidebar">
+        <div class="comic-sidebar-header">
+          <span class="comic-title"><span class="title-icon">🔒</span> 剧情固定基底 (Global Locks)</span>
+          <button type="button" id="comicPullCurrentBtn" class="btn ghost-btn tiny" title="从主生图界面拉取当前配置">从主页导入</button>
+        </div>
+
+        <!-- 1. 画风与基础修饰词 (锁定) -->
+        <div class="card comic-card">
+          <div class="card-title-bar">
+            <label class="sec-title-sm"><span class="title-icon">🎨</span> 固定画风 / 环境词 (Style Prompt)</label>
+            <button type="button" id="comicStyleLibBtn" class="btn ghost-btn tiny">📚 选画风</button>
+          </div>
+          <textarea id="comicStylePrompt" rows="3" class="styled-admin-input" placeholder="例如：masterpiece, anime screencap, 2026 official art, sunset lighting, classroom ambient..."></textarea>
+          <div class="comic-field-tip">固定在每张图片提示词开头，确保全篇画风统一。</div>
+        </div>
+
+        <!-- 2. 多角色独立锁定体系 (Multi-Characters) -->
+        <div class="card comic-card">
+          <div class="card-title-bar">
+            <label class="sec-title-sm"><span class="title-icon">👥</span> 出场角色列表 (Characters)</label>
+            <div class="comic-char-actions">
+              <button type="button" id="comicCharLibBtn" class="btn ghost-btn tiny">📚 从库导入</button>
+              <button type="button" id="comicAddCharBtn" class="btn ghost-btn tiny">＋ 加角色</button>
+            </div>
+          </div>
+          <div id="comicCharList" class="comic-char-list"></div>
+          <div class="comic-field-tip">支持多个角色出场与指定站位（NovelAI 独立分框技术）。</div>
+        </div>
+        <!-- 3. 固定排除词 (UC) -->
+        <div class="card comic-card">
+          <div class="card-title-bar">
+            <label class="sec-title-sm"><span class="title-icon">🚫</span> 全局排除元素 (Negative / UC)</label>
+          </div>
+          <textarea id="comicUc" rows="2" class="styled-admin-input" placeholder="lowres, bad quality, jpeg artifacts, bad hands, blurry..."></textarea>
+        </div>
+
+        <!-- 4. 固定硬件生成参数 (尺寸/种子/步数) -->
+        <div class="card comic-card">
+          <div class="card-title-bar">
+            <label class="sec-title-sm"><span class="title-icon">⚙️</span> 生成模型与尺寸</label>
+          </div>
+          <div class="comic-param-grid">
+            <div class="comic-field">
+              <label>模型</label>
+              <select id="comicModelSel" class="styled-select"></select>
+            </div>
+            <div class="comic-field">
+              <label>固定随机种子 (Seed)</label>
+              <div class="comic-seed-wrap">
+                <input id="comicSeedInp" type="number" placeholder="锁定固定种子">
+                <button type="button" id="comicRandSeedBtn" class="btn ghost-btn tiny">🎲 换种子</button>
+              </div>
+            </div>
+            <div class="comic-field-row">
+              <div class="comic-field">
+                <label>宽</label>
+                <input id="comicWidth" type="number" value="832" step="64" class="styled-admin-input">
+              </div>
+              <div class="comic-field">
+                <label>高</label>
+                <input id="comicHeight" type="number" value="1216" step="64" class="styled-admin-input">
+              </div>
+              <div class="comic-field">
+                <label>步数</label>
+                <input id="comicSteps" type="number" value="28" max="50" class="styled-admin-input">
+              </div>
+              <div class="comic-field">
+                <label>CFG</label>
+                <input id="comicScale" type="number" value="5" step="0.5" class="styled-admin-input">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 底部批量队列控制 -->
+        <div class="comic-action-box">
+          <div class="comic-queue-info">
+            <span id="comicPanelCount">共 3 个分镜</span>
+            <span id="comicCostEstimate" class="comic-cost-tag">预计免费 (0 Anlas)</span>
+          </div>
+          <button type="button" id="comicRunBatchBtn" class="btn primary exec-btn glow">
+            <span class="btn-icon">▶</span>
+            <span id="comicRunBtnText">连续批量生成分镜剧情</span>
+          </button>
+          <div id="comicStatusTxt" class="comic-status-banner hidden"></div>
+        </div>
+      </aside>
+
+      <!-- 右侧：连环画分镜工作流时间轴 (Panels Timeline) -->
+      <main class="comic-stage">
+        <div class="comic-stage-toolbar">
+          <div class="comic-stage-title">
+            <span class="title-icon">🎬</span>
+            <span>剧情分镜板 (Story Panels)</span>
+            <span class="comic-stage-sub">每个分镜只替换当前镜头的主提示词（动作、视角、表情），固定种子与画风保持人物连贯</span>
+          </div>
+          <div class="comic-stage-actions">
+            <button type="button" id="comicAddPanelBtn" class="btn ghost-btn small">＋ 新增分镜卡</button>
+            <button type="button" id="comicClearDoneBtn" class="btn ghost-btn small">清空已生成</button>
+            <button type="button" id="comicBackToStdBtn" class="btn ghost-btn small">返回单图生成</button>
+          </div>
+        </div>
+
+        <!-- 分镜卡片容器 -->
+        <div id="comicPanelsList" class="comic-panels-grid"></div>
+      </main>
+    </div>
+  </div>
+
+  <!-- ════════ 3. 模态窗口层 ════════ -->
+
+  <!-- 原图灯箱查看器 -->
+  <div id="lightboxModal" class="modal-backdrop hidden">
+    <div class="lightbox-shell">
+      <button id="lightboxClose" class="lightbox-close-btn">✕</button>
+      <div class="lightbox-content">
+        <div class="lightbox-img-pane">
+          <img id="lightboxImg" alt="大图详情">
+        </div>
+        <div class="lightbox-info-pane">
+          <div class="lightbox-title">作品档案</div>
+          <div class="lightbox-field">
+            <span class="lbl">提示词 (Prompt)</span>
+            <div id="lbPrompt" class="val-text"></div>
+            <button type="button" class="btn tiny ghost-btn" id="lbCopyPrompt">复制 Prompt</button>
+          </div>
+          <div class="lightbox-field">
+            <span class="lbl">负面排除 (UC)</span>
+            <div id="lbUc" class="val-text"></div>
+          </div>
+          <div id="lbCharsField" class="lightbox-field hidden">
+            <div class="lb-chars-head">
+              <span class="lbl">角色 (Characters)</span>
+              <button type="button" class="btn tiny ghost-btn" id="lbReuseCharsBtn">复用角色</button>
+            </div>
+            <div id="lbCharsList" class="lb-chars-list"></div>
+          </div>
+          <div class="lightbox-meta-grid">
+            <div><span class="lbl">模型</span><span id="lbModel" class="val-mono"></span></div>
+            <div><span class="lbl">尺寸</span><span id="lbSize" class="val-mono"></span></div>
+            <div><span class="lbl">步数</span><span id="lbSteps" class="val-mono"></span></div>
+            <div><span class="lbl">种子</span><span id="lbSeed" class="val-mono"></span></div>
+          </div>
+          <div class="lightbox-actions">
+            <button id="lbFavBtn" class="btn ghost-btn small">🤍 收藏</button>
+            <button id="lbDlBtn" class="btn ghost-btn small">⬇ 下载原图</button>
+            <button id="lbReuseBtn" class="btn primary small">⚙️ 复用该图全部参数</button>
+            <button id="lbDelBtn" class="btn ghost-btn small" style="color:var(--err);">🗑 删除此记录</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 用户个人设置（修改用户名与密码） -->
+  <div id="profileModal" class="modal-backdrop hidden">
+    <div class="modal-window profile-window">
+      <div class="modal-title-row">
+        <h3>👤 个人设置</h3>
+        <button id="profileCloseBtn" class="btn icon-btn">✕</button>
+      </div>
+      <form id="profileForm" class="modal-form">
+        <div class="form-item">
+          <label>用户名</label>
+          <input id="profUsername" placeholder="支持中英数字 2-20 位" required>
+        </div>
+        <div class="form-sep"></div>
+        <div class="form-sub-title">修改访问密码 (不改请留空)</div>
+        <div class="form-item">
+          <label>原密码</label>
+          <input id="profOldPass" type="password" placeholder="验证原密码">
+        </div>
+        <div class="form-item">
+          <label>新密码 (≥8 位)</label>
+          <input id="profNewPass" type="password" placeholder="输入新密码">
+        </div>
+        <div id="profErr" class="auth-err"></div>
+        <div class="modal-actions">
+          <button type="button" id="profileCancelBtn" class="btn ghost-btn">取消</button>
+          <button type="submit" class="btn primary">保存修改</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 📚 片段库模态弹窗 -->
+  <div id="promptLibModal" class="modal-backdrop hidden">
+    <div class="modal-window prompt-lib-window">
+      <div class="modal-title-row">
+        <div class="admin-top-title">
+          <span class="admin-crown">📚</span>
+          <span>片段库 · 提示词资产</span>
+        </div>
+        <div class="admin-top-actions">
+          <button type="button" id="promptLibCloseBtn" class="btn ghost-btn small">✕ 关闭</button>
+        </div>
+      </div>
+
+      <div class="admin-tab-nav lib-tab-nav" id="promptLibTabNav">
+        <button type="button" data-kind="painter" class="nav-tab active">🎨 画师串</button>
+        <button type="button" data-kind="action" class="nav-tab">🏃 动作串</button>
+        <button type="button" data-kind="uc" class="nav-tab">🚫 UC片段</button>
+        <button type="button" data-kind="character" class="nav-tab">👥 角色</button>
+        <button type="button" data-kind="main" class="nav-tab">🌟 主串</button>
+      </div>
+
+      <!-- 新增片段卡片表单 -->
+      <div class="admin-card lib-add-card" id="libAddCard">
+        <div class="admin-card-head lib-add-card-head" id="libAddCardHead">
+          <div class="card-caption">
+            <span class="caption-icon">➕</span>
+            <span class="caption-title" id="libFormTitle">添加新片段</span><span class="lib-fold-hint">（点击折叠/展开）</span>
+          </div>
+          <div class="lib-add-head-right">
+            <span class="caption-tip" id="libFormTip">保存常用提示词，方便快速复用</span>
+            <span class="lib-add-arrow" id="libAddArrow">▼</span>
+          </div>
+        </div>
+        <form id="libAddForm" class="lib-form">
+          <div class="lib-form-row">
+            <div class="lib-form-field title-field">
+              <label class="field-title">标题备注</label>
+              <input id="libItemTitle" class="styled-admin-input" placeholder="例如：水墨水彩混搭 / 战斗跳跃姿态 / 主角银发少女" required>
+            </div>
+          </div>
+
+          <!-- 常规单内容区域 (painter, action, uc, main) -->
+          <div id="libNormalContentWrap" class="lib-form-row">
+            <div class="lib-form-field">
+              <label class="field-title" id="libContentLabel">提示词内容</label>
+              <textarea id="libItemContent" class="styled-admin-input lib-textarea" rows="3" placeholder="填写提示词内容 tags..."></textarea>
+            </div>
+          </div>
+
+          <!-- 角色专属表单区域 (character) -->
+          <div id="libCharContentWrap" class="lib-char-form-wrap hidden">
+            <div class="lib-form-row">
+              <div class="lib-form-field">
+                <label class="field-title">角色独立提示词 (Prompt)</label>
+                <textarea id="libCharPrompt" class="styled-admin-input lib-textarea" rows="2" placeholder="raiden shogun (genshin impact)"></textarea>
+              </div>
+            </div>
+            <div class="lib-form-row">
+              <div class="lib-form-field">
+                <label class="field-title">角色排除词 (Negative / UC，选填)</label>
+                <input id="libCharUc" class="styled-admin-input" placeholder="bad anatomy, lowres...">
+              </div>
+            </div>
+            <div class="lib-form-row lib-char-pos-row">
+              <div class="lib-pos-mode-toggle">
+                <label class="field-title">站位模式</label>
+                <div class="char-mode-toggle">
+                  <button type="button" id="libCharPosAutoBtn" class="char-mode-btn active">自动位置 (Auto)</button>
+                  <button type="button" id="libCharPosManualBtn" class="char-mode-btn">指定坐标 (Manual)</button>
+                </div>
+              </div>
+              <div id="libCharCoordInputs" class="lib-coord-inputs hidden">
+                <label class="lib-coord-item">
+                  <span>X (水平 0.0~1.0):</span>
+                  <input type="number" id="libCharPosX" class="styled-admin-input tiny-num" min="0" max="1" step="0.05" value="0.5">
+                </label>
+                <label class="lib-coord-item">
+                  <span>Y (垂直 0.0~1.0):</span>
+                  <input type="number" id="libCharPosY" class="styled-admin-input tiny-num" min="0" max="1" step="0.05" value="0.5">
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="lib-form-actions">
+            <button type="submit" id="libSaveBtn" class="btn primary glow small">
+              <span>保存到片段库</span>
+              <span class="btn-sub-ico">💾</span>
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- 片段列表 -->
+      <div class="lib-list-container">
+        <div class="lib-list-head">
+          <span class="lib-list-title" id="libListTitle">已保存片段</span>
+          <span class="lib-list-tip" id="libListTip">点击条目可选择导入或复制</span>
+        </div>
+        <div id="libIpTabs" class="lib-ip-tabs hidden" role="tablist" aria-label="片段分组"></div>
+        <div id="libItemsList" class="lib-items-list">
+          <div class="lib-empty">加载中…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 管理员控制台（独立全屏抽屉模态） -->
+  <div id="adminModal" class="modal-backdrop admin-backdrop hidden">
+    <div class="modal-window admin-window">
+      <div class="modal-title-row">
+        <div class="admin-top-title">
+          <span class="admin-crown">⚙️</span>
+          <span>管理后台</span>
+        </div>
+        <div class="admin-top-actions">
+          <button id="adminTestAllBtn" class="btn primary small glow">⚡ 测试全部密钥有效性</button>
+          <button id="adminCloseBtn" class="btn ghost-btn small">✕ 关闭</button>
+        </div>
+      </div>
+
+      <div class="admin-tab-nav">
+        <button data-tab="keys" class="nav-tab active">PST 密钥池</button>
+        <button data-tab="users" class="nav-tab">用户管理</button>
+        <button data-tab="gens" class="nav-tab">全站生成记录</button>
+        <button data-tab="stats" class="nav-tab">用量统计</button>
+        <button data-tab="plugin" class="nav-tab">插件 API</button>
+      </div>
+
+      <!-- Tab 1: 密钥池 -->
+      <div id="tab-keys" class="tab-pane">
+        <div class="admin-card">
+          <div class="admin-card-head">
+            <div class="card-caption">
+              <span class="caption-icon">➕</span>
+              <span class="caption-title">添加 PST 密钥</span>
+            </div>
+            <span class="caption-tip">添加后自动验证有效性并同步订阅等级与 Anlas 余额</span>
+          </div>
+          <div class="admin-form-grid">
+            <div class="admin-field flex-1">
+              <label class="field-title">备注标签</label>
+              <div class="admin-input-wrap">
+                <span class="admin-input-ico">🏷️</span>
+                <input id="keyLabel" placeholder="例如：主号 / 备用号" class="styled-admin-input">
+              </div>
+            </div>
+            <div class="admin-field flex-1">
+              <label class="field-title">对应绑定邮箱 (选填)</label>
+              <div class="admin-input-wrap">
+                <span class="admin-input-ico">📧</span>
+                <input id="keyEmail" placeholder="例如：user@gmail.com" class="styled-admin-input">
+              </div>
+            </div>
+            <div class="admin-field flex-2">
+              <label class="field-title">NovelAI Persistent Token (PST)</label>
+              <div class="admin-input-wrap">
+                <span class="admin-input-ico">🔑</span>
+                <input id="keyToken" placeholder="以 pst- 开头的完整持久密钥字符串" class="styled-admin-input mono">
+                <button type="button" id="keyPasteBtn" class="admin-inner-btn" title="粘贴剪贴板内容">📋 粘贴</button>
+              </div>
+            </div>
+            <div class="admin-field-action">
+              <button id="keyAdd" class="btn primary glow admin-add-btn">
+                <span>验证并添加</span>
+                <span class="btn-sub-ico">⚡</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="data-table" id="keysTbl">
+            <thead>
+              <tr>
+                <th>ID</th><th>备注标签</th><th>账号邮箱</th><th>密钥预览</th><th>状态</th><th>V5 充能电量</th><th>订阅级别</th><th>Anlas 余额</th><th>调用次数</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tab 2: 用户 -->
+      <div id="tab-users" class="tab-pane hidden">
+        <div class="admin-card">
+          <div class="admin-card-head">
+            <div class="card-caption">
+              <span class="caption-icon">👤</span>
+              <span class="caption-title">创建新用户</span>
+            </div>
+            <span class="caption-tip">为不同用户分配独立账号与权限</span>
+          </div>
+          <div class="admin-form-grid">
+            <div class="admin-field flex-1">
+              <label class="field-title">用户名</label>
+              <div class="admin-input-wrap">
+                <span class="admin-input-ico">👤</span>
+                <input id="newUserName" placeholder="2-20 位中英数字" class="styled-admin-input">
+              </div>
+            </div>
+            <div class="admin-field flex-1">
+              <label class="field-title">初始密码</label>
+              <div class="admin-input-wrap">
+                <span class="admin-input-ico">🔒</span>
+                <input id="newUserPass" type="password" placeholder="至少 8 位密码" class="styled-admin-input">
+              </div>
+            </div>
+            <div class="admin-field flex-1">
+              <label class="field-title">权限角色</label>
+              <div class="admin-select-wrap">
+                <select id="newUserRole" class="styled-admin-select">
+                  <option value="user">普通用户 (仅 Opus 免费规格)</option>
+                  <option value="admin">管理员 (无限制)</option>
+                </select>
+              </div>
+            </div>
+            <div class="admin-field-action">
+              <button id="userAdd" class="btn primary glow admin-add-btn">
+                <span>确认创建</span>
+                <span class="btn-sub-ico">+</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="data-table" id="usersTbl">
+            <thead>
+              <tr>
+                <th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>配额状态 (1分 / 1时 / 24小时 / 累计)</th><th>创建时间</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tab 3: 日志 -->
+      <div id="tab-gens" class="tab-pane hidden">
+        <div class="table-container">
+          <table class="data-table" id="gensTbl">
+            <thead>
+              <tr>
+                <th>ID</th><th>用户</th><th>模型</th><th>尺寸</th><th>步数</th><th>Anlas</th><th>状态</th><th>耗时</th><th>时间</th><th>提示词</th><th>图片</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tab 4: 统计 -->
+      <div id="tab-stats" class="tab-pane hidden">
+        <div id="statsBox" class="stats-cards-grid"></div>
+      </div>
+
+      <div id="tab-plugin" class="tab-pane hidden">
+        <!-- 顶部状态横幅 -->
+        <div class="plugin-hero-card">
+          <div class="plugin-hero-main">
+            <div class="plugin-hero-badge">
+              <span class="plugin-hero-dot"></span>
+              <span>Official NAI Protocol Compatible</span>
+            </div>
+            <h4 class="plugin-hero-title">SillyTavern 柏宝绘 / 外部插件直连网关</h4>
+            <p class="plugin-hero-desc">无需修改客户端，在柏宝绘直接选择 <strong>NovelAI</strong> 渠道，即可共享本站 PST 密钥池与 Opus 免费调度策略。所有凭据均采用 SHA-256 安全哈希存储。</p>
+          </div>
+          <div class="plugin-hero-stats">
+            <div class="plugin-stat-pill">
+              <span class="pill-label">认证模式</span>
+              <span class="pill-val">Bearer Token</span>
+            </div>
+            <div class="plugin-stat-pill">
+              <span class="pill-label">流格式</span>
+              <span class="pill-val">Zip / PNG & DataURL</span>
+            </div>
+            <div class="plugin-stat-pill">
+              <span class="pill-label">频控防护</span>
+              <span class="pill-val">20 req/min</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 三步接入指南卡片 -->
+        <div class="admin-card plugin-guide-card">
+          <div class="admin-card-head">
+            <div class="card-caption">
+              <span class="caption-icon">⚡</span>
+              <span class="caption-title">3 步完成柏宝绘配置</span>
+            </div>
+            <span class="caption-tip">即配即用，开箱自动识别</span>
+          </div>
+          <div class="plugin-steps-grid">
+            <div class="plugin-step-item">
+              <div class="step-num">01</div>
+              <div class="step-content">
+                <div class="step-title">安装扩展插件</div>
+                <div class="step-desc">在 SillyTavern 扩展中心输入 GitHub 地址：</div>
+                <div class="step-code-box">
+                  <code>https://github.com/baibai-git/ST-BaiBai-Image</code>
+                  <button type="button" class="btn tiny ghost-btn" id="pluginCopyRepoBtn" title="复制仓库地址">复制</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="plugin-step-item">
+              <div class="step-num">02</div>
+              <div class="step-content">
+                <div class="step-title">设置接口地址</div>
+                <div class="step-desc">渠道选择 <strong>NovelAI</strong>，填入此 Base URL：</div>
+                <div class="step-code-box">
+                  <code id="pluginBaseUrlText">http://127.0.0.1:7860</code>
+                  <button type="button" class="btn tiny ghost-btn" id="pluginCopyUrl" title="复制服务地址">复制</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="plugin-step-item">
+              <div class="step-num">03</div>
+              <div class="step-content">
+                <div class="step-title">填入 API Token</div>
+                <div class="step-desc">在下方签发管理员 Token，填入 <strong>API Key</strong> 栏；并在插件中<strong>关闭 Vibe Transfer</strong>。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Token 签发与生成卡片 -->
+        <div class="admin-card plugin-issuer-card">
+          <div class="admin-card-head">
+            <div class="card-caption">
+              <span class="caption-icon">🔑</span>
+              <span class="caption-title">签发专属 API Token</span>
+            </div>
+            <span class="caption-tip">令牌仅在生成时完整展示一次，请妥善保存</span>
+          </div>
+          <div class="admin-form-grid" style="align-items: flex-end;">
+            <div class="admin-field flex-2">
+              <label class="field-title">客户端名称 / 备注标签</label>
+              <div class="admin-input-wrap">
+                <span class="admin-input-ico">🏷️</span>
+                <input id="pluginTokenLabel" placeholder="例如：我的酒馆-台式机" class="styled-admin-input">
+              </div>
+            </div>
+            <div class="admin-field-action">
+              <button id="pluginTokenAdd" class="btn primary glow admin-add-btn">
+                <span>生成管理员 Token</span>
+                <span class="btn-sub-ico">✨</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="pluginTokenOnce" class="plugin-token-alert hidden">
+            <div class="alert-icon">⚠️</div>
+            <div class="alert-body">
+              <div class="alert-head">Token 已生成（请立即复制并填入插件，页面关闭后将无法再次查看原文）：</div>
+              <div class="alert-token-row">
+                <code id="pluginTokenOnceVal" class="mono"></code>
+                <button type="button" id="pluginCopyToken" class="btn small primary glow">一键复制 Token</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 端点矩阵与文档卡片 -->
+        <div class="admin-card plugin-endpoints-card">
+          <div class="admin-card-head">
+            <div class="card-caption">
+              <span class="caption-icon">🌐</span>
+              <span class="caption-title">端点矩阵与兼容性概览</span>
+            </div>
+            <span class="caption-tip">支持官方二进制流与自定义自动化平台</span>
+          </div>
+          <div class="plugin-matrix-grid">
+            <div class="matrix-item">
+              <div class="matrix-head">
+                <span class="matrix-badge get">GET</span>
+                <span class="matrix-path">/ai/user/subscription</span>
+              </div>
+              <div class="matrix-name">连通性测试 (柏宝绘自动握手)</div>
+              <div class="matrix-desc">模拟官方 Opus 终生免费层返回，打通插件后端探活与层级断言。</div>
+            </div>
+
+            <div class="matrix-item">
+              <div class="matrix-head">
+                <span class="matrix-badge post">POST</span>
+                <span class="matrix-path">/ai/generate-image</span>
+              </div>
+              <div class="matrix-name">官方标准生图 (ZIP 包格式)</div>
+              <div class="matrix-desc">接收官方 action/parameters 请求体，打包 Store-ZIP 回传多张生成图。</div>
+            </div>
+
+            <div class="matrix-item">
+              <div class="matrix-head">
+                <span class="matrix-badge post">POST</span>
+                <span class="matrix-path">/api/v1/generate</span>
+              </div>
+              <div class="matrix-name">轻量级 REST API (DataURL / JSON)</div>
+              <div class="matrix-desc">通用外部脚本/前端组件调用，免去客户端解包，直接返回 Base64 与图片 URL。</div>
+            </div>
+
+            <div class="matrix-item">
+              <div class="matrix-head">
+                <span class="matrix-badge get">GET</span>
+                <span class="matrix-path">/api/v1/models</span>
+              </div>
+              <div class="matrix-name">模型与尺寸元数据</div>
+              <div class="matrix-desc">列出当前服务支持的模型字典、采样器集合、尺寸推荐预设。</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 已激活 Token 审计表格 -->
+        <div class="table-container plugin-token-table-wrap">
+          <div class="table-header-bar">
+            <span class="tbl-title">📋 已激活的插件令牌列表</span>
+            <span class="tbl-sub">撤销后关联客户端将立即拒绝访问（401）</span>
+          </div>
+          <table class="data-table" id="pluginTokTbl">
+            <thead>
+              <tr>
+                <th style="width: 60px;">ID</th>
+                <th>客户端备注</th>
+                <th style="width: 130px;">令牌前缀</th>
+                <th style="width: 140px;">最后调用时间</th>
+                <th style="width: 140px;">签发时间</th>
+                <th style="width: 80px; text-align: center;">操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 兼容占位 -->
+  <section id="adminView" class="hidden"></section>
+  <div id="inpaintSec" class="hidden"></div>
+</div>
+
+<div id="toast" class="toast-chip hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

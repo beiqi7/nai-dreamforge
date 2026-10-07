@@ -1,0 +1,14 @@
+{
+  "name": "nai-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NovelAI image-generation web service",
+  "engines": {
+    "node": ">=22.0.0 <23"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check lib/auth.js && node --check lib/db.js && node --check lib/nai.js && node --check lib/policy.js && node --check lib/scheduler.js && node --check lib/zip.js && node --check lib/nai-compat.js && node --check public/app.js && node --check test/security-smoke.js",
+    "test": "node test/security-smoke.js"
+  }
+}
