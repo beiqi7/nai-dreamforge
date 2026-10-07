@@ -832,6 +832,38 @@ async function testPromptLibraryAuth(child, normalHeaders, adminHeaders, adminCo
   const promptId = createPrompt.body.id;
   assert.ok(promptId);
 
+  // 不带 kind：一次返回全部分类
+  const all = await request('/api/prompts', { headers: normalHeaders });
+  assert.equal(all.response.status, 200);
+  assert.ok(all.body.items.some((it) => it.id === promptId));
+  assert.equal(all.body.limit, 500);
+
+  // 批量导入：与已有条目完全相同的跳过，批内重复也只导入一次；任一条无效则整体拒绝
+  const imp = await request('/api/prompts/import', {
+    method: 'POST', headers: normalHeaders,
+    body: JSON.stringify({ items: [
+      { kind: 'main', title: '测试片段', content: '1girl, solo' },
+      { kind: 'painter', title: '画师A', content: 'artist:a' },
+      { kind: 'painter', title: '画师A', content: 'artist:a' },
+      { kind: 'uc', title: 'UC', content: 'lowres' },
+    ] }),
+  });
+  assert.equal(imp.response.status, 200, JSON.stringify(imp.body));
+  assert.deepEqual([imp.body.added, imp.body.skipped], [2, 2]);
+  const badImp = await request('/api/prompts/import', {
+    method: 'POST', headers: normalHeaders,
+    body: JSON.stringify({ items: [{ kind: 'uc', title: 'ok', content: 'x' }, { kind: 'nope', title: 't', content: 'c' }] }),
+  });
+  assert.equal(badImp.response.status, 400);
+  assert.match(badImp.body.error, /第 2 条/);
+  const afterImp = await request('/api/prompts', { headers: normalHeaders });
+  assert.equal(afterImp.body.items.length, 3);
+  const adminList = await request('/api/prompts', { headers: adminHeaders });
+  assert.ok(!adminList.body.items.some((it) => it.title === '画师A'), 'imports must stay scoped to the importing user');
+  for (const it of afterImp.body.items.filter((x) => x.id !== promptId)) {
+    await request(`/api/prompts/${it.id}`, { method: 'DELETE', headers: normalHeaders });
+  }
+
   // 无效 kind 参数
   const badKind = await request('/api/prompts', {
     method: 'POST', headers: normalHeaders,
@@ -975,6 +1007,23 @@ async function testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUse
   const bad = keys.body.items.find(k => k.id === badKey.body.id);
   assert.equal(bad.is_active, 0);
   assert.equal(bad.verify_state, 'invalid:401');
+
+  // 密钥池快照：汇总只计启用且有效的节点；免费生图优先节点是那把有效的 Opus 密钥
+  assert.equal(keys.body.summary.total, 2);
+  assert.equal(keys.body.summary.healthy, 1);
+  assert.equal(keys.body.summary.totalAnlas, 1000);
+  assert.equal(keys.body.summary.avgBattery, 80);
+  assert.equal(keys.body.nextFreeKeyId, addKey.body.id);
+  assert.ok(!JSON.stringify(keys.body).includes(`pst-${'a'.repeat(32)}`), 'pool snapshot must not leak full tokens');
+  assert.ok(keys.body.items.every((k) => !('token' in k)));
+  const cachedPool = await request('/api/anlas?cached=1', { headers: adminHeaders });
+  assert.equal(cachedPool.response.status, 200);
+  assert.equal(cachedPool.body.live, false);
+  assert.equal(cachedPool.body.summary.freeReady, 1);
+  const livePool = await request('/api/anlas?refresh=1', { headers: adminHeaders });
+  assert.equal(livePool.body.live, true);
+  assert.deepEqual(livePool.body.errors, {});
+  assert.ok(livePool.body.refreshedAt);
 
   // 频控：每分钟 6 张后 429；管理员重置后立即恢复，且历史记录的时间不被改写
   const before = (await request('/api/history?limit=1', { headers: normalHeaders })).body.items[0];
