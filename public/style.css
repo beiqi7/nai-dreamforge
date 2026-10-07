@@ -1182,7 +1182,7 @@ input[type="range"] {
   background: var(--bg-input);
   border: 1px solid var(--border-subtle);
   cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.25s, box-shadow 0.25s;
 }
 .hist-cell:hover {
   transform: translateY(-3px) scale(1.02);
@@ -3846,6 +3846,20 @@ textarea.char-inp {
   transform: translateY(-3px);
   border-color: rgba(124, 108, 240, 0.45);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(124, 108, 240, 0.15);
+}
+
+/* 离屏卡片跳过布局与绘制；auto 让浏览器记住渲染过的真实高度，滚动条不抖 */
+.gal-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 420px;
+}
+
+.gal-sentinel {
+  padding: 20px 0 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  min-height: 1px;
 }
 
 .gal-card.selected {

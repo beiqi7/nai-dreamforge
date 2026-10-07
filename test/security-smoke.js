@@ -12,12 +12,31 @@ const { MODELS, extractZipEntries } = require('../lib/nai');
 const scheduler = require('../lib/scheduler');
 const { crc32, crc32Table, zipStore, zipStoreChunks } = require('../lib/zip');
 const { officialToSiteRequest, fakeOpusSubscription } = require('../lib/nai-compat');
+const zlib = require('node:zlib');
+const { decodePng, downscale, encodePng, makeThumbnail } = require('../lib/png');
+const { encodeJpeg, AC_LUMA_VALS, AC_CHROMA_VALS, ZIGZAG } = require('../lib/jpeg');
 
 const ROOT = path.join(__dirname, '..');
 const PORT = 18761;
 const UPSTREAM_PORT = 18762;
 const TEST_IMG_DIR = path.join(os.tmpdir(), `nai-smoke-${process.pid}`);
-const FAKE_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), crypto.randomBytes(256)]);
+const TEST_THUMB_DIR = path.join(os.tmpdir(), `nai-smoke-thumbs-${process.pid}`);
+
+function gradientImage(width, height, channels) {
+  const data = new Uint8Array(width * height * channels);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * channels;
+      data[o] = (x * 255 / width) | 0;
+      data[o + 1] = (y * 255 / height) | 0;
+      data[o + 2] = ((x + y) * 7) & 0xff;
+      if (channels === 4) data[o + 3] = x < width / 2 ? 255 : 128;
+    }
+  }
+  return { width, height, channels, data };
+}
+// 假上游返回真实可解码的 PNG，缩略图链路才能端到端跑通
+const FAKE_PNG = encodePng(gradientImage(512, 768, 3));
 
 /* ─── 工具 ─────────────────────────────────────────────── */
 
@@ -82,6 +101,88 @@ function testZipAndCompat() {
   assert.equal(mapped.body.ucPreset, 'none');
   assert.equal(mapped.body.charPrompts[0].prompt, 'long hair');
   assert.equal(fakeOpusSubscription().tier, 3);
+}
+
+/** 手工构造 PNG（任意颜色类型、可选 PLTE/tRNS），滤波统一为 Sub 以覆盖反滤波路径 */
+function rawPng({ width, height, color, rows, plte, trns }) {
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length, 0);
+    head.write(type, 4, 'latin1');
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
+    return Buffer.concat([head, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = color;
+  const bpp = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[color];
+  const filtered = Buffer.concat(rows.map((row) => {
+    const out = Buffer.alloc(row.length + 1);
+    out[0] = 1;
+    for (let x = 0; x < row.length; x++) out[x + 1] = (row[x] - (x >= bpp ? row[x - bpp] : 0)) & 0xff;
+    return out;
+  }));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    ...(plte ? [chunk('PLTE', Buffer.from(plte))] : []),
+    ...(trns ? [chunk('tRNS', Buffer.from(trns))] : []),
+    chunk('IDAT', zlib.deflateSync(filtered)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function testImageCodecs() {
+  // PNG 编解码往返无损（含逐行自适应滤波）
+  for (const ch of [3, 4]) {
+    const img = gradientImage(37, 23, ch);
+    const back = decodePng(encodePng(img));
+    assert.equal(back.width, 37);
+    assert.equal(back.channels, ch);
+    assert.deepEqual(Buffer.from(back.data), Buffer.from(img.data));
+  }
+  // 调色板 + tRNS → RGBA
+  const pal = decodePng(rawPng({
+    width: 3, height: 1, color: 3, rows: [[0, 1, 2]],
+    plte: [255, 0, 0, 0, 255, 0, 0, 0, 255], trns: [0, 128],
+  }));
+  assert.deepEqual([...pal.data], [255, 0, 0, 0, 0, 255, 0, 128, 0, 0, 255, 255]);
+  // 灰度 → RGB
+  const gray = decodePng(rawPng({ width: 2, height: 2, color: 0, rows: [[10, 20], [30, 40]] }));
+  assert.equal(gray.channels, 3);
+  assert.deepEqual([...gray.data], [10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40]);
+  assert.equal(decodePng(Buffer.from('not a png')), null);
+
+  // 面积平均缩放：尺寸按比例，纯色保持纯色，α 预乘不让透明像素把颜色拉黑
+  const small = downscale(gradientImage(400, 600, 3), 100);
+  assert.equal(small.width, 100);
+  assert.equal(small.height, 150);
+  const half = { width: 2, height: 1, channels: 4, data: Uint8Array.from([200, 100, 50, 255, 0, 0, 0, 0]) };
+  assert.deepEqual([...downscale(half, 1).data], [200, 100, 50, 128]);
+
+  // JPEG：Huffman 表恰好覆盖 162 个符号，zigzag 为 0..63 的排列，输出结构与尺寸正确
+  const symbols = new Set([0x00, 0xf0]);
+  for (let r = 0; r < 16; r++) for (let sz = 1; sz <= 10; sz++) symbols.add((r << 4) | sz);
+  for (const vals of [AC_LUMA_VALS, AC_CHROMA_VALS]) {
+    assert.equal(vals.length, 162);
+    assert.deepEqual(new Set(vals), symbols);
+  }
+  assert.equal(new Set(ZIGZAG).size, 64);
+  const jpg = encodeJpeg(gradientImage(50, 30, 3), 80);
+  assert.deepEqual([...jpg.subarray(0, 2)], [0xff, 0xd8]);
+  assert.deepEqual([...jpg.subarray(-2)], [0xff, 0xd9]);
+  const sof = jpg.indexOf(Buffer.from([0xff, 0xc0]));
+  assert.equal(jpg.readUInt16BE(sof + 5), 30);
+  assert.equal(jpg.readUInt16BE(sof + 7), 50);
+
+  // 缩略图：不透明 → JPEG，含透明 → PNG
+  assert.equal(makeThumbnail(FAKE_PNG, 384).type, 'image/jpeg');
+  const alphaThumb = makeThumbnail(encodePng(gradientImage(800, 400, 4)), 384);
+  assert.equal(alphaThumb.type, 'image/png');
+  assert.equal(decodePng(alphaThumb.data).width, 384);
 }
 
 async function testZipStreaming() {
@@ -360,6 +461,7 @@ async function startServer() {
       COOKIE_SECURE: '0',
       NAI_IMAGE_BASE: `http://127.0.0.1:${UPSTREAM_PORT}`,
       NAI_IMG_DIR: TEST_IMG_DIR,
+      NAI_THUMB_DIR: TEST_THUMB_DIR,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -590,6 +692,7 @@ async function testHttpSecurity() {
     });
     upstream.server.close();
     fs.rmSync(TEST_IMG_DIR, { recursive: true, force: true });
+    fs.rmSync(TEST_THUMB_DIR, { recursive: true, force: true });
   }
   // 只允许 Node 实验特性提示与调度器的预期告警；其余 stderr 一律视为失败
   const unexpected = stderr().split('\n')
@@ -801,6 +904,18 @@ async function testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUse
   assert.equal(img.status, 200);
   assert.deepEqual(Buffer.from(await img.arrayBuffer()), FAKE_PNG);
 
+  // 缩略图：属主可取，JPEG、宽 384；其他人 404
+  const thumbUrl = gen.body.image.replace('/img/', '/thumb/');
+  const thumb = await fetch(`http://127.0.0.1:${PORT}${thumbUrl}`, { headers: normalHeaders });
+  assert.equal(thumb.status, 200);
+  assert.equal(thumb.headers.get('content-type'), 'image/jpeg');
+  const thumbBuf = Buffer.from(await thumb.arrayBuffer());
+  const sof = thumbBuf.indexOf(Buffer.from([0xff, 0xc0]));
+  assert.equal(thumbBuf.readUInt16BE(sof + 7), 384);
+  assert.equal((await fetch(`http://127.0.0.1:${PORT}${thumbUrl}`)).status, 404);
+  const thumbBase = path.basename(gen.body.image, '.png');
+  assert.ok(fs.existsSync(path.join(TEST_THUMB_DIR, `${thumbBase}.jpg`)));
+
   // 流式批量下载：返回合法 ZIP，内容与原图一致，文件名带 id
   const dl = await fetch(`http://127.0.0.1:${PORT}/api/history/batch-download`, {
     method: 'POST', headers: normalHeaders, body: JSON.stringify({ ids: [rec.id, rec.id, 999999] }),
@@ -818,6 +933,7 @@ async function testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUse
   });
   assert.equal(del.response.status, 200);
   assert.equal(del.body.deleted, 1);
+  assert.ok(!fs.existsSync(path.join(TEST_THUMB_DIR, `${thumbBase}.jpg`)), 'thumbnail should be removed with the image');
 
   const genBody = JSON.stringify({ prompt: '1girl, solo', model: T2I_MODEL, width: 832, height: 1216, steps: 28 });
   const generate = () => request('/api/generate', { method: 'POST', headers: normalHeaders, body: genBody });
@@ -852,6 +968,18 @@ async function testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUse
   const after = (await request('/api/history?limit=60', { headers: normalHeaders })).body.items.find(it => it.id === before.id);
   assert.equal(after.created_at, before.created_at);
 
+  // 画廊游标分页：首屏带计数，翻页不重不漏
+  const page1 = await request('/api/history?limit=3&ok=1', { headers: normalHeaders });
+  assert.equal(page1.body.items.length, 3);
+  assert.ok(page1.body.counts.total >= 6);
+  assert.equal(page1.body.nextBefore, page1.body.items[2].id);
+  const page2 = await request(`/api/history?limit=3&ok=1&before=${page1.body.nextBefore}`, { headers: normalHeaders });
+  assert.equal(page2.body.counts, undefined);
+  assert.ok(page2.body.items.every(it => it.id < page1.body.nextBefore && it.status === 'ok'));
+  const all = await request('/api/history?limit=500&ok=1', { headers: normalHeaders });
+  assert.equal(all.body.items.length, page1.body.counts.total);
+  assert.equal(all.body.nextBefore, null);
+
   console.log('  [generate-flow] 生图/历史/批量下载/失效 key 切换/频控重置测试通过');
 }
 async function testImageAccessControl(child, normalCookie, adminCookie) {
@@ -879,6 +1007,7 @@ async function testImageAccessControl(child, normalCookie, adminCookie) {
   testPolicyInputValidation();
   testPolicyAdminCapabilities();
   testZipAndCompat();
+  testImageCodecs();
   await testZipStreaming();
 
   console.log('Running scheduler tests...');

@@ -49,12 +49,16 @@ const { getSessionUser, getSessionToken, getRequestUser, getBearerToken, session
 const { scheduleGenerate } = require('./lib/scheduler');
 const { zipStore, zipStoreChunks } = require('./lib/zip');
 const { officialToSiteRequest, fakeOpusSubscription } = require('./lib/nai-compat');
+const { createThumbnailer } = require('./lib/thumbs');
 
 const PORT = Number(process.env.PORT || 7860);
 const HOST = process.env.HOST || '127.0.0.1';
 const IMG_DIR = process.env.NAI_IMG_DIR || path.join(__dirname, 'data', 'images');
 fs.mkdirSync(IMG_DIR, { recursive: true, mode: 0o700 });
 try { fs.chmodSync(IMG_DIR, 0o700); } catch {}
+// 缩略图与原图分目录存放：原图备份脚本递归 rclone copy 原图目录，不应带上缩略图
+const THUMB_DIR = process.env.NAI_THUMB_DIR || path.join(path.dirname(IMG_DIR), 'thumbs');
+const thumbs = createThumbnailer({ imgDir: IMG_DIR, thumbDir: THUMB_DIR });
 
 ensureAdmin();
 qSessions.delExpired();
@@ -206,12 +210,23 @@ async function removeGeneratedFile(file) {
   } catch (error) {
     if (error.code !== 'ENOENT') console.error('[image-cleanup]', file, error);
   }
+  await thumbs.remove(file);
 }
 
 async function persistPng(buf, index = 0) {
   const fname = `${Date.now()}-${index}-${crypto.randomBytes(4).toString('hex')}.png`;
   await fs.promises.writeFile(path.join(IMG_DIR, fname), buf, { mode: 0o600 });
+  thumbs.generate(fname); // 后台预生成缩略图，历史/画廊刷新时通常已就绪
   return fname;
+}
+
+/** 生成图属主或管理员可见；返回安全的文件名，无权时返回 null */
+function authorizedImageFile(req, rawName) {
+  const file = path.basename(rawName);
+  const rec = qGens.byFile(file);
+  const u = getRequestUser(req);
+  if (!rec || !u || (u.user_id !== rec.user_id && u.role !== 'admin')) return null;
+  return file;
 }
 
 async function finishGenerationFile(genId, buf, anlas, t0, index = 0) {
@@ -685,10 +700,16 @@ const server = http.createServer(async (req, res) => {
 
     /* 图片（属主或管理员可见） */
     if (req.method === 'GET' && p.startsWith('/img/')) {
-      const file = path.basename(p.slice(5));
-      const rec = qGens.byFile(file);
-      const u = getRequestUser(req);
-      if (!rec || !u || (u.user_id !== rec.user_id && u.role !== 'admin')) return fail(res, 404, '无权访问');
+      const file = authorizedImageFile(req, p.slice(5));
+      if (!file) return fail(res, 404, '无权访问');
+      return serveFile(req, res, path.join(IMG_DIR, file), 'image/png', true);
+    }
+    /* 缩略图：网格/画廊用，约为原图体积的 1/15；无法生成时回退原图 */
+    if (req.method === 'GET' && p.startsWith('/thumb/')) {
+      const file = authorizedImageFile(req, p.slice(7));
+      if (!file) return fail(res, 404, '无权访问');
+      const thumb = await thumbs.get(file);
+      if (thumb) return serveFile(req, res, thumb.path, thumb.type, true);
       return serveFile(req, res, path.join(IMG_DIR, file), 'image/png', true);
     }
 
@@ -787,8 +808,13 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/history' && req.method === 'GET') {
       if (!user) return fail(res, 401, '未登录');
       const limit = parseLimit(url.searchParams.get('limit'), 60, 500);
-      const favOnly = url.searchParams.get('favorite') === '1';
-      const rows = qGens.byUser(user.user_id, limit, favOnly);
+      const before = Number(url.searchParams.get('before'));
+      const okOnly = url.searchParams.get('ok') === '1';
+      const rows = qGens.byUser(user.user_id, limit, {
+        favoritedOnly: url.searchParams.get('favorite') === '1',
+        okOnly,
+        before,
+      });
       const items = rows.map((r) => {
         let charPrompts = [];
         if (r.char_prompts) {
@@ -796,7 +822,10 @@ const server = http.createServer(async (req, res) => {
         }
         return { ...r, is_favorited: !!r.is_favorited, charPrompts: Array.isArray(charPrompts) ? charPrompts : [] };
       });
-      return ok(res, { items });
+      const nextBefore = rows.length === limit ? rows[rows.length - 1].id : null;
+      // 画廊首屏顺带返回总数/收藏数，用于筛选标签计数
+      const counts = okOnly && !(before > 0) ? qGens.countGalleryByUser(user.user_id) : undefined;
+      return ok(res, { items, nextBefore, counts });
     }
 
     let histMatch;

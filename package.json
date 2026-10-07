@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check lib/auth.js && node --check lib/db.js && node --check lib/nai.js && node --check lib/policy.js && node --check lib/scheduler.js && node --check lib/zip.js && node --check lib/nai-compat.js && node --check public/app.js && node --check test/security-smoke.js",
+    "check": "for f in server.js lib/*.js public/app.js scripts/*.js test/*.js; do node --check \"$f\" || exit 1; done",
     "test": "node test/security-smoke.js"
   }
 }
