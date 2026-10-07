@@ -328,6 +328,10 @@ function startFakeUpstream() {
       return res.end(JSON.stringify({ plainTextEmail: 'fake@example.com' }));
     }
     if (req.method === 'POST' && req.url === '/ai/generate-image') {
+      if (String(req.headers.authorization || '').includes('pst-bad')) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ message: 'Invalid token' }));
+      }
       const chunks = [];
       for await (const c of req) chunks.push(c);
       const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -391,6 +395,22 @@ async function testHttpSecurity() {
       assert.equal(failed.response.status, 401);
     }
     assert.equal((await login('locked-account', 'wrong-password')).response.status, 429);
+
+    // 伪造 X-Forwarded-For 最左侧条目不能绕过按 IP 限速：只认代理追加的最右侧地址
+    for (let i = 0; i < 20; i++) {
+      const r = await request('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': `198.51.100.${i}, 10.9.9.9` },
+        body: JSON.stringify({ username: `nobody-${i}`, password: 'wrong-password' }),
+      });
+      assert.equal(r.response.status, 401);
+    }
+    const spoofed = await request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.7, 10.9.9.9' },
+      body: JSON.stringify({ username: 'nobody-x', password: 'wrong-password' }),
+    });
+    assert.equal(spoofed.response.status, 429);
 
     // 管理员登录
     const admin = await login('auditadmin', 'AuditPassword123');
@@ -485,6 +505,12 @@ async function testHttpSecurity() {
     const sub = await request('/ai/user/subscription', { headers: bearer });
     assert.equal(sub.response.status, 200);
     assert.equal(sub.body.tier, 3);
+    // 去掉 /ai 前缀的别名同样走插件鉴权
+    assert.equal((await request('/user/subscription')).response.status, 401);
+    const subAlias = await request('/user/subscription', { headers: bearer });
+    assert.equal(subAlias.response.status, 200);
+    assert.equal(subAlias.body.tier, 3);
+    assert.equal((await request('/aix', { headers: bearer })).response.status, 404);
     const aiOpt = await request('/ai/generate-image', { method: 'OPTIONS' });
     assert.equal(aiOpt.response.status, 204);
     const aiBad = await request('/ai/generate-image', {
@@ -535,7 +561,7 @@ async function testHttpSecurity() {
     await testPromptLibraryAuth(child, normalHeaders, adminHeaders, admin.cookie);
     await testImageAccessControl(child, normal.cookie, admin.cookie);
     await testGalleryBatchAuth(child, normalHeaders);
-    await testGenerateFlow(adminHeaders, normalHeaders, upstream);
+    await testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUserId);
   } finally {
     child.kill('SIGTERM');
     await new Promise(resolve => {
@@ -545,8 +571,10 @@ async function testHttpSecurity() {
     upstream.server.close();
     fs.rmSync(TEST_IMG_DIR, { recursive: true, force: true });
   }
-  const errText = stderr();
-  if (errText && !/ExperimentalWarning/.test(errText)) throw new Error(errText);
+  // 只允许 Node 实验特性提示与调度器的预期告警；其余 stderr 一律视为失败
+  const unexpected = stderr().split('\n')
+    .filter(line => line.trim() && !/ExperimentalWarning|--trace-warnings|^\[scheduler\]/.test(line));
+  if (unexpected.length) throw new Error(unexpected.join('\n'));
 }
 
 async function testAdminProtection(child, adminHeaders, adminCookie, admin2Id) {
@@ -725,7 +753,7 @@ async function testGalleryBatchAuth(child, normalHeaders) {
   console.log('  [gallery-batch] 画廊批量操作鉴权测试通过');
 }
 
-async function testGenerateFlow(adminHeaders, normalHeaders, upstream) {
+async function testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUserId) {
   const addKey = await request('/api/admin/keys', {
     method: 'POST', headers: adminHeaders,
     body: JSON.stringify({ label: 'fake', token: `pst-${'a'.repeat(32)}` }),
@@ -771,7 +799,40 @@ async function testGenerateFlow(adminHeaders, normalHeaders, upstream) {
   assert.equal(del.response.status, 200);
   assert.equal(del.body.deleted, 1);
 
-  console.log('  [generate-flow] 生图/历史/批量下载链路测试通过');
+  const genBody = JSON.stringify({ prompt: '1girl, solo', model: T2I_MODEL, width: 832, height: 1216, steps: 28 });
+  const generate = () => request('/api/generate', { method: 'POST', headers: normalHeaders, body: genBody });
+
+  // 失效 key（上游 401）：自动停用并切到下一个 key，用户请求照常成功
+  const badKey = await request('/api/admin/keys', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ label: 'bad', token: `pst-bad${'b'.repeat(32)}` }),
+  });
+  assert.equal(badKey.response.status, 200);
+  const failover = await generate();
+  assert.equal(failover.response.status, 200, JSON.stringify(failover.body));
+  const keys = await request('/api/admin/keys', { headers: adminHeaders });
+  const bad = keys.body.items.find(k => k.id === badKey.body.id);
+  assert.equal(bad.is_active, 0);
+  assert.equal(bad.verify_state, 'invalid:401');
+
+  // 频控：每分钟 6 张后 429；管理员重置后立即恢复，且历史记录的时间不被改写
+  const before = (await request('/api/history?limit=1', { headers: normalHeaders })).body.items[0];
+  let limited = null;
+  for (let i = 0; i < 8 && !limited; i++) {
+    const r = await generate();
+    if (r.response.status === 429) limited = r;
+    else assert.equal(r.response.status, 200, JSON.stringify(r.body));
+  }
+  assert.ok(limited, 'expected per-minute limit to trigger');
+  const reset = await request(`/api/admin/users/${normalUserId}`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ resetQuota: true }),
+  });
+  assert.equal(reset.response.status, 200);
+  assert.equal((await generate()).response.status, 200);
+  const after = (await request('/api/history?limit=60', { headers: normalHeaders })).body.items.find(it => it.id === before.id);
+  assert.equal(after.created_at, before.created_at);
+
+  console.log('  [generate-flow] 生图/历史/批量下载/失效 key 切换/频控重置测试通过');
 }
 async function testImageAccessControl(child, normalCookie, adminCookie) {
   // 无会话访问图片 → 404

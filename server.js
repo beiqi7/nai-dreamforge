@@ -154,6 +154,12 @@ function parseIdList(ids) {
   return { ids: [...new Set(ids.map(Number).filter(n => Number.isInteger(n) && n > 0))] };
 }
 
+// 官方客户端可能把站点 origin 当作 api/image 两个域名的根，因此也接受去掉 /ai 前缀的路径
+const PLUGIN_ROOT_ALIASES = new Set(['/user/subscription', '/generate-image', '/encode-vibe']);
+function isPluginPath(p) {
+  return p === '/api/v1' || p.startsWith('/api/v1/') || p === '/ai' || p.startsWith('/ai/') || PLUGIN_ROOT_ALIASES.has(p);
+}
+
 async function requireAdmin(req, res) {
   const u = getSessionUser(req);
   if (!u) { fail(res, 401, '请先登录'); return null; }
@@ -224,12 +230,16 @@ const PLUGIN_GEN_WINDOW_MS = 60 * 1000;
 const PLUGIN_GEN_MAX = Math.max(1, Number(process.env.PLUGIN_GEN_MAX || 20));
 const pluginGenHits = new Map();
 
+// 本机前面有几层可信反向代理：只有 nginx 为 1（默认）；Cloudflare → nginx 为 2；不经代理设 0。
+const TRUST_PROXY_HOPS = Math.max(0, Math.trunc(Number(process.env.TRUST_PROXY_HOPS ?? 1)) || 0);
 function clientIp(req) {
   const remote = req.socket.remoteAddress || '';
   const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
-  if (isLocal) {
-    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (forwarded) return forwarded.slice(0, 128);
+  if (isLocal && TRUST_PROXY_HOPS > 0) {
+    // 每层代理在末尾追加它看到的来源地址，最左侧的条目可被客户端伪造；
+    // 从右往左数第 N 个才是最外层可信代理看到的真实客户端。
+    const chain = String(req.headers['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (chain.length) return chain[Math.max(0, chain.length - TRUST_PROXY_HOPS)].slice(0, 128);
   }
   return remote || 'unknown';
 }
@@ -543,7 +553,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, ready ? 200 : 503, { ok: ready, db: dbOk, disk: diskOk, keys });
     }
 
-    if (p.startsWith('/api/v1') || p.startsWith('/ai')) {
+    if (isPluginPath(p)) {
       applyPluginCors(res);
       if (req.method === 'OPTIONS') {
         writeHead(res, 204);
@@ -580,9 +590,7 @@ const server = http.createServer(async (req, res) => {
       if ((p === '/ai/encode-vibe' || p === '/encode-vibe') && req.method === 'POST') {
         return fail(res, 404, '本站不支持 vibe 编码，请在柏宝绘渠道关闭 Vibe Transfer');
       }
-      if (p.startsWith('/api/v1') || p.startsWith('/ai')) {
-        return fail(res, 404, '未知插件接口');
-      }
+      return fail(res, 404, '未知插件接口');
     }
 
 

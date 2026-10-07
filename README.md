@@ -8,6 +8,8 @@
 # 首次启动必须显式设置管理员；密码至少 12 位
 ADMIN_USER=admin ADMIN_PASS='请替换为高强度密码' node server.js
 # 由 HTTPS 反向代理访问时保持 COOKIE_SECURE=1（默认）；仅本机纯 HTTP 调试可临时设为 0
+# TRUST_PROXY_HOPS：本机前的可信代理层数，用于从 X-Forwarded-For 取真实客户端 IP（登录限速按 IP 计）
+#   只有 nginx（默认）=1；Cloudflare → nginx =2；不经代理直接暴露 =0
 ```
 
 打开 `http://localhost:7860`。系统不会创建或展示默认弱口令；首次启动缺少安全管理员配置时会拒绝启动。
