@@ -3035,18 +3035,24 @@ textarea.char-inp {
     align-items: center;
     justify-content: space-between;
   }
-  .nav-brand { gap: 6px; }
+  .nav-brand { gap: 6px; flex-shrink: 0; }
   .nav-title { font-size: 14px; font-weight: 700; }
   .nav-tag { display: none; }
+  /* 不能用 justify-content: flex-end：溢出会跑到左侧不可滚动区域，首个按钮被标题压住点不到。
+     改为起点对齐 + 首项 margin-left:auto，空间够时靠右，不够时从左开始并可横向滚动。 */
   .nav-actions {
     gap: 4px;
+    flex: 1 1 auto;
+    min-width: 0;
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
-    max-width: 70%;
-    justify-content: flex-end;
+    justify-content: flex-start;
   }
+  .nav-actions > :first-child { margin-left: auto; }
   .nav-actions::-webkit-scrollbar { display: none; }
+  .gallery-chip > span:not(.chip-icon),
+  .anlas-chip > span:not(.chip-icon) { display: none; }
   .pill-btn {
     padding: 6px 8px;
     min-height: 32px;
@@ -3891,11 +3897,10 @@ textarea.char-inp {
   top: 8px;
   left: 8px;
   z-index: 4;
-  background: rgba(0, 0, 0, 0.55);
+  /* 不用 backdrop-filter：每张卡两层模糊，几百张时手机滚动明显掉帧 */
+  background: rgba(0, 0, 0, 0.6);
   border-radius: 6px;
   padding: 4px;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
 }
 .gal-chk-wrap input {
   width: 16px;
@@ -3923,8 +3928,6 @@ textarea.char-inp {
   justify-content: center;
   font-size: 13px;
   cursor: pointer;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
   transition: transform 0.15s ease, background 0.15s;
 }
 .gal-fav-btn:hover {
@@ -3971,3 +3974,25 @@ textarea.char-inp {
   background: rgba(6, 182, 212, 0.22);
 }
 
+/* 手机端画廊：两列浏览，信息行收紧 */
+@media (max-width: 600px) {
+  .dedicated-gallery-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .gal-card { contain-intrinsic-size: auto 290px; }
+  .gal-card-meta { padding: 7px 8px; gap: 2px; }
+  .gal-card-info { flex-direction: column; gap: 1px; }
+  .gal-fav-btn { width: 28px; height: 28px; top: 6px; right: 6px; }
+  .gal-chk-wrap { top: 6px; left: 6px; }
+}
+
+/* 系统开启“减少动态效果”时关闭装饰动画与过渡（无障碍；低端机也更流畅） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
