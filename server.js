@@ -43,7 +43,8 @@ const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 
 const { NaiClient, MODELS, SAMPLERS, NOISE_SCHEDULES, SIZE_PRESETS, UC_PRESETS, OPUS_FREE, calcAnlas, randomSeed } = require('./lib/nai');
-const { db, qUsers, qSessions, qKeys, qGens, qPrompts, qApiTokens, ensureAdmin, verifyPassword, verifyLoginPassword, isUniqueViolation } = require('./lib/db');
+const { db, qUsers, qTiers, qSessions, qKeys, qGens, qPrompts, qApiTokens, ensureAdmin, verifyPassword, verifyLoginPassword, isUniqueViolation } = require('./lib/db');
+const { FREE_TIER, parseTierInput, parseOverride } = require('./lib/tiers');
 const { applyPolicy } = require('./lib/policy');
 const { getSessionUser, getSessionToken, getRequestUser, getBearerToken, sessionCookie, clearSessionCookie, readJson } = require('./lib/auth');
 const { scheduleGenerate } = require('./lib/scheduler');
@@ -395,29 +396,66 @@ async function handleGenerate(req, res, user, preBody) {
     else activeUserGenerations.delete(user.user_id);
   }
 }
+/** 普通用户的生效限额（等级 + 单人覆盖）；管理员返回 null */
+function userLimits(user) {
+  if (user.role === 'admin') return null;
+  return qUsers.limits(user.user_id) || FREE_TIER;
+}
+
+/** 前端展示用：等级限额与最近窗口用量 */
+function quotaSnapshot(user) {
+  const limits = userLimits(user);
+  if (!limits) return null;
+  const usage = qGens.countRecentByUser(user.user_id);
+  return {
+    tier: {
+      id: limits.tier_id ?? null,
+      name: limits.name,
+      maxPixels: limits.max_pixels,
+      maxSteps: limits.max_steps,
+      maxSamples: limits.max_samples,
+      allowImg2img: !!limits.allow_img2img,
+      allowInpaint: !!limits.allow_inpaint,
+      perMinute: limits.limit_per_minute,
+      perHour: limits.limit_per_hour,
+      perDay: limits.limit_per_day,
+      anlasPerDay: limits.anlas_per_day,
+    },
+    usage: { minute: usage.count_1m, hour: usage.count_1h, day: usage.count_1d, anlasDay: usage.anlas_1d },
+  };
+}
+
 async function handleAdmittedGenerate(req, res, user, preBody) {
-  const body = preBody || await readJson(req, user.role === 'admin' ? 24 * 1024 * 1024 : 64 * 1024);
-  const pol = applyPolicy(user.role, body);
+  const limits = userLimits(user);
+  const mayUpload = !limits || limits.allow_img2img || limits.allow_inpaint;
+  const body = preBody || await readJson(req, mayUpload ? 24 * 1024 * 1024 : 64 * 1024);
+  const pol = applyPolicy(user.role, body, limits);
   if (!pol.ok) return fail(res, 400, pol.error);
-  /* 服务器级频控与权限防线 */
-  if (user.role !== 'admin') {
-    if (pol.v.img2img || pol.v.inpaint) {
-      return fail(res, 403, '免费用户无图生图 (i2i) 与局部重绘 (infill) 权限');
+  /* 服务器级频控与权限防线（与 policy 独立的第二道校验） */
+  if (limits) {
+    if ((pol.v.img2img && !limits.allow_img2img) || (pol.v.inpaint && !limits.allow_inpaint)) {
+      return fail(res, 403, `当前等级「${limits.name}」没有图生图 / 局部重绘权限`);
     }
-    if (pol.anlas > 0) {
-      return fail(res, 400, '免费层仅支持免费参数（需消耗 0 Anlas），当前请求需消耗 Anlas，请降低参数或联系管理员升级');
+    if (pol.anlas > 0 && !(limits.anlas_per_day > 0)) {
+      return fail(res, 400, `当前等级「${limits.name}」仅支持 0 Anlas 的免费参数，请降低参数或联系管理员升级`);
     }
 
-    // 频控检查：1分钟6张，1小时66张，1天240张
+    // 频控按“本次要出的张数”预占：已用 + 本次 > 上限 即拒绝
     const counts = qGens.countRecentByUser(user.user_id);
-    if (counts.count_1m >= 6) {
-      return fail(res, 429, `出图频率过快：普通用户每分钟限 6 张（最近 1 分钟已生成 ${counts.count_1m} 张），请稍息片刻再试`);
+    const n = pol.v.nSamples;
+    const windows = [
+      [limits.limit_per_minute, counts.count_1m, '每分钟', '最近 1 分钟', '请稍等片刻再试'],
+      [limits.limit_per_hour, counts.count_1h, '每小时', '最近 1 小时', '请稍后重试'],
+      [limits.limit_per_day, counts.count_1d, '每天', '最近 24 小时', '请明天再来或联系管理员'],
+    ];
+    for (const [max, used, per, recent, hint] of windows) {
+      if (max != null && used + n > max) {
+        return fail(res, 429, `已达出图上限：「${limits.name}」${per}限 ${max} 张（${recent}已生成 ${used} 张），${hint}`);
+      }
     }
-    if (counts.count_1h >= 66) {
-      return fail(res, 429, `出图频率受限：普通用户每小时限 66 张（最近 1 小时已生成 ${counts.count_1h} 张），请稍后重试`);
-    }
-    if (counts.count_1d >= 240) {
-      return fail(res, 429, `今日配额已达上限：普通用户每日限 240 张（最近 24 小时已生成 ${counts.count_1d} 张），请明日再来`);
+    if (pol.anlas > 0 && counts.anlas_1d + pol.anlas > limits.anlas_per_day) {
+      const left = Math.max(0, limits.anlas_per_day - counts.anlas_1d);
+      return fail(res, 429, `Anlas 额度不足：本次约需 ${pol.anlas}，24 小时内还剩 ${left} / ${limits.anlas_per_day}，请降低参数或联系管理员`);
     }
   }
 
@@ -484,6 +522,8 @@ async function handleAdmittedGenerate(req, res, user, preBody) {
         urls.push(`/img/${fname}`);
       }
     }
+    // 其余每张已各有一条记录，主记录改为只代表 1 张，频控与统计不重复计数
+    if (allPngs.length > 1) qGens.setSamples(genId, 1);
     qKeys.markUsed(key.id);
     // 若是 V5 模型，后台异步轻量拉取该 key 最新剩余电量与 Anlas，不阻塞生图返回
     if (payload.model?.startsWith('nai-diffusion-5')) refreshKeySubscription(key);
@@ -751,7 +791,7 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/me' && req.method === 'GET') {
       if (!user) return fail(res, 401, '未登录');
-      return ok(res, { id: user.user_id, username: user.username, role: user.role });
+      return ok(res, { id: user.user_id, username: user.username, role: user.role, quota: quotaSnapshot(user) });
     }
 
     /* 用户个人设置：修改用户名或密码 */
@@ -992,16 +1032,17 @@ const server = http.createServer(async (req, res) => {
 
       if (p === '/api/admin/users' && req.method === 'GET') return ok(res, { items: qUsers.listWithUsage() });
       if (p === '/api/admin/users' && req.method === 'POST') {
-        const { username, password, role } = await readJson(req, 8192);
+        const { username, password, role, tierId } = await readJson(req, 8192);
         const normalizedUsername = String(username || '').trim();
         if (!normalizedUsername || typeof password !== 'string' || password.length < 8) return fail(res, 400, '用户名与密码必填（密码 ≥8 位）');
         if (normalizedUsername.length < 2 || normalizedUsername.length > 20 || !/^[a-zA-Z0-9_\u4e00-\u9fa5]+$/.test(normalizedUsername)) {
           return fail(res, 400, '用户名须为 2–20 位汉字、字母、数字或下划线');
         }
         if (!['admin', 'user'].includes(role)) return fail(res, 400, '角色须为 admin/user');
+        if (tierId != null && tierId !== '' && !qTiers.get(Number(tierId))) return fail(res, 400, '等级不存在');
         if (qUsers.byName(normalizedUsername)) return fail(res, 409, '用户已存在');
         try {
-          const id = qUsers.create(normalizedUsername, password, role);
+          const id = qUsers.create(normalizedUsername, password, role, tierId ? Number(tierId) : null);
           return ok(res, { id });
         } catch (error) {
           if (isUniqueViolation(error)) return fail(res, 409, '用户已存在');
@@ -1049,6 +1090,18 @@ const server = http.createServer(async (req, res) => {
           qUsers.setDisabled(id, b.disabled);
           if (b.disabled) qSessions.delByUser(id);
         }
+        if (b.tierId !== undefined) {
+          if (!qTiers.get(Number(b.tierId))) return fail(res, 400, '等级不存在');
+          qUsers.setTier(id, Number(b.tierId));
+        }
+        if (b.limitPerDayOverride !== undefined || b.anlasPerDayOverride !== undefined) {
+          const cur = qUsers.overrides(id);
+          const day = b.limitPerDayOverride !== undefined ? parseOverride(b.limitPerDayOverride, 1_000_000) : { ok: true, value: cur.limit_per_day_override };
+          const anlas = b.anlasPerDayOverride !== undefined ? parseOverride(b.anlasPerDayOverride, 1_000_000) : { ok: true, value: cur.anlas_per_day_override };
+          if (!day.ok) return fail(res, 400, `每日张数${day.error}`);
+          if (!anlas.ok) return fail(res, 400, `每日 Anlas ${anlas.error}`);
+          qUsers.setOverrides(id, day.value, anlas.value);
+        }
         if (b.resetQuota === true) {
           qGens.resetQuotaByUser(id);
         }
@@ -1075,6 +1128,39 @@ const server = http.createServer(async (req, res) => {
         }
         await Promise.all(files.map(removeGeneratedFile));
         return ok(res, {});
+      }
+
+      /* 用户等级 */
+      if (p === '/api/admin/tiers' && req.method === 'GET') return ok(res, { items: qTiers.list() });
+      if (p === '/api/admin/tiers' && req.method === 'POST') {
+        const parsed = parseTierInput(await readJson(req, 8192));
+        if (!parsed.ok) return fail(res, 400, parsed.error);
+        try {
+          return ok(res, { id: qTiers.create(parsed.value) });
+        } catch (error) {
+          if (isUniqueViolation(error)) return fail(res, 409, '等级名称已存在');
+          throw error;
+        }
+      }
+      if ((m = p.match(/^\/api\/admin\/tiers\/(\d+)$/)) && req.method === 'POST') {
+        const id = Number(m[1]);
+        if (!qTiers.get(id)) return fail(res, 404, '等级不存在');
+        const parsed = parseTierInput(await readJson(req, 8192), { partial: true });
+        if (!parsed.ok) return fail(res, 400, parsed.error);
+        try {
+          qTiers.update(id, parsed.value);
+        } catch (error) {
+          if (isUniqueViolation(error)) return fail(res, 409, '等级名称已存在');
+          throw error;
+        }
+        return ok(res, {});
+      }
+      if ((m = p.match(/^\/api\/admin\/tiers\/(\d+)$/)) && req.method === 'DELETE') {
+        const tier = qTiers.get(Number(m[1]));
+        if (!tier) return fail(res, 404, '等级不存在');
+        if (tier.is_default) return fail(res, 400, '默认等级不能删除');
+        const moved = qTiers.delete(tier.id, qTiers.defaultId());
+        return ok(res, { moved });
       }
 
       if (p === '/api/admin/keys' && req.method === 'GET') return ok(res, { items: qKeys.list() });

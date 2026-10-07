@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { applyPolicy } = require('../lib/policy');
+const { DEFAULT_TIERS, parseTierInput } = require('../lib/tiers');
 const { MODELS, extractZipEntries } = require('../lib/nai');
 const scheduler = require('../lib/scheduler');
 const { crc32, crc32Table, zipStore, zipStoreChunks } = require('../lib/zip');
@@ -308,6 +309,29 @@ function testPolicyAdminCapabilities() {
   assert.equal(fanoutFree.ok, true);
   assert.equal(fanoutFree.v.keyFanout, true);
   assert.equal(fanoutFree.anlas, 0);
+}
+
+function testPolicyTiers() {
+  const base = { prompt: '1girl', model: T2I_MODEL, width: 832, height: 1216, steps: 28 };
+  const pro = DEFAULT_TIERS[1];
+  // 高级等级：多张、图生图、较大尺寸可用；超出等级上限仍拒绝
+  assert.equal(applyPolicy('user', { ...base, nSamples: 4 }, pro).ok, true);
+  assert.equal(applyPolicy('user', { ...base, nSamples: 5 }, pro).code, 'n_samples');
+  assert.equal(applyPolicy('user', { ...base, img2img: { image: 'data:image/png;base64,abc' } }, pro).ok, true);
+  assert.equal(applyPolicy('user', { ...base, width: 1024, height: 1536, steps: 40 }, pro).ok, true);
+  assert.equal(applyPolicy('user', { ...base, width: 1536, height: 1536 }, pro).code, 'size');
+  // 没有 Anlas 日额度的等级不能发起计费请求
+  const noAnlas = { ...pro, anlas_per_day: 0 };
+  assert.equal(applyPolicy('user', { ...base, nSamples: 2 }, noAnlas).code, 'anlas');
+  // 未传等级时等同默认免费等级
+  assert.equal(applyPolicy('user', { ...base, nSamples: 2 }).code, 'n_samples');
+
+  assert.equal(parseTierInput({ name: '', max_pixels: 1048576, max_steps: 28, max_samples: 1, anlas_per_day: 0 }).ok, false);
+  assert.equal(parseTierInput({ name: 'x', max_pixels: 1048576, max_steps: 99, max_samples: 1, anlas_per_day: 0 }).ok, false);
+  const parsed = parseTierInput({ name: ' VIP ', max_pixels: 2359296, max_steps: 50, max_samples: 8, anlas_per_day: 1000, limit_per_day: '' });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.value.name, 'VIP');
+  assert.equal(parsed.value.limit_per_day, null);
 }
 
 /* ─── 调度器租约释放测试 ───────────────────────────────── */
@@ -684,6 +708,7 @@ async function testHttpSecurity() {
     await testImageAccessControl(child, normal.cookie, admin.cookie);
     await testGalleryBatchAuth(child, normalHeaders);
     await testGenerateFlow(adminHeaders, normalHeaders, upstream, normalUserId);
+    await testTiers(adminHeaders, normalHeaders, normalUserId);
   } finally {
     child.kill('SIGTERM');
     await new Promise(resolve => {
@@ -998,6 +1023,77 @@ async function testImageAccessControl(child, normalCookie, adminCookie) {
   console.log('  [image-access] 图片属主校验测试通过');
 }
 
+async function testTiers(adminHeaders, normalHeaders, normalUserId) {
+  const post = (url, body, headers = adminHeaders) => request(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  const me = async () => (await request('/api/me', { headers: normalHeaders })).body.quota;
+  const genBody = { prompt: '1girl, solo', model: T2I_MODEL, width: 832, height: 1216, steps: 28 };
+
+  // 默认两个等级；普通用户不能管理等级
+  const tiers = await request('/api/admin/tiers', { headers: adminHeaders });
+  assert.equal(tiers.response.status, 200);
+  assert.deepEqual(tiers.body.items.map(t => t.name), ['普通用户', '高级用户']);
+  const [freeTier, proTier] = tiers.body.items;
+  assert.equal((await request('/api/admin/tiers', { headers: normalHeaders })).response.status, 403);
+  assert.equal((await post('/api/admin/tiers', { name: '' })).response.status, 400);
+  assert.equal((await post('/api/admin/tiers', { ...proTier, name: '普通用户' })).response.status, 409);
+
+  // /api/me 带出等级与用量；免费等级不能出多张
+  let quota = await me();
+  assert.equal(quota.tier.name, '普通用户');
+  assert.equal(quota.tier.maxSamples, 1);
+  assert.equal((await post('/api/generate', { ...genBody, nSamples: 2 }, normalHeaders)).response.status, 400);
+
+  // 升到高级等级后可出多张；一次 2 张只计 2 张（不再把主记录重复计数）
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { tierId: proTier.id })).response.status, 200);
+  quota = await me();
+  assert.equal(quota.tier.name, '高级用户');
+  const dayBefore = quota.usage.day;
+  const anlasBefore = quota.usage.anlasDay;
+  const two = await post('/api/generate', { ...genBody, nSamples: 2 }, normalHeaders);
+  assert.equal(two.response.status, 200, JSON.stringify(two.body));
+  assert.equal(two.body.images.length, 2);
+  assert.ok(two.body.anlas > 0);
+  quota = await me();
+  assert.equal(quota.usage.day, dayBefore + 2);
+  assert.equal(quota.usage.anlasDay, anlasBefore + two.body.anlas);
+
+  // 单人覆盖：Anlas 日额度不足时拒绝，清空覆盖后恢复跟随等级
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { anlasPerDayOverride: quota.usage.anlasDay + 1 })).response.status, 200);
+  const broke = await post('/api/generate', { ...genBody, nSamples: 2 }, normalHeaders);
+  assert.equal(broke.response.status, 429);
+  assert.match(broke.body.error, /Anlas 额度不足/);
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { anlasPerDayOverride: '' })).response.status, 200);
+  assert.equal((await me()).tier.anlasPerDay, proTier.anlas_per_day);
+
+  // 单人覆盖：每日张数到顶即拒绝
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { limitPerDayOverride: quota.usage.day })).response.status, 200);
+  const capped = await post('/api/generate', genBody, normalHeaders);
+  assert.equal(capped.response.status, 429);
+  assert.match(capped.body.error, /每天限/);
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { limitPerDayOverride: -1 })).response.status, 400);
+  assert.equal((await post(`/api/admin/users/${normalUserId}`, { limitPerDayOverride: null })).response.status, 200);
+
+  // 管理员列表带出等级与 24 小时 Anlas 用量
+  const users = await request('/api/admin/users', { headers: adminHeaders });
+  const row = users.body.items.find(u => u.id === normalUserId);
+  assert.equal(row.tier_name, '高级用户');
+  assert.ok(row.a1 >= two.body.anlas);
+
+  // 删除等级：其下用户回到默认等级；默认等级不可删
+  const temp = await post('/api/admin/tiers', { ...proTier, name: '临时等级' });
+  assert.equal(temp.response.status, 200);
+  await post(`/api/admin/users/${normalUserId}`, { tierId: temp.body.id });
+  const edited = await post(`/api/admin/tiers/${temp.body.id}`, { max_samples: 2 });
+  assert.equal(edited.response.status, 200);
+  assert.equal((await me()).tier.maxSamples, 2);
+  const removed = await request(`/api/admin/tiers/${temp.body.id}`, { method: 'DELETE', headers: adminHeaders });
+  assert.equal(removed.body.moved, 1);
+  assert.equal((await me()).tier.name, '普通用户');
+  assert.equal((await request(`/api/admin/tiers/${freeTier.id}`, { method: 'DELETE', headers: adminHeaders })).response.status, 400);
+
+  console.log('  [tiers] 用户等级 / 单人额度 / 多张计数测试通过');
+}
+
 /* ─── 主入口 ───────────────────────────────────────────── */
 
 (async () => {
@@ -1006,6 +1102,7 @@ async function testImageAccessControl(child, normalCookie, adminCookie) {
   testPolicyFreeUserRestrictions();
   testPolicyInputValidation();
   testPolicyAdminCapabilities();
+  testPolicyTiers();
   testZipAndCompat();
   testImageCodecs();
   await testZipStreaming();
